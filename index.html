@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 多次随机贪心</title>
+  <title>货车装箱 - 高度图算法</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
@@ -37,8 +37,8 @@
     <div style="margin-top:15px;">
       <label>算法</label>
       <select id="mode">
-        <option value="multi" selected>多次随机贪心 (推荐)</option>
-        <option value="single">单次贪心</option>
+        <option value="heightmap" selected>高度图算法 (推荐)</option>
+        <option value="heightmap-fast">快速模式 (单次)</option>
       </select>
     </div>
     <button id="calcBtn">🚛 开始计算</button>
@@ -55,166 +55,115 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ---------- 方向 ----------
-function getAllowedOrientations(w,d,h, topLayer) {
+// ==================== 工具：方向 ====================
+function getAllowedOrientations(w,d,h, isTopLayer) {
   const ori = [[w,d,h]];
   if (w !== d) ori.push([d,w,h]);
-  if (topLayer) {
+  if (isTopLayer) {
     const all = [[w,d,h],[d,w,h],[w,h,d],[h,w,d],[d,h,w],[h,d,w]];
     return Array.from(new Set(all.map(a=>a.join(',')))).map(s=>s.split(',').map(Number));
   }
   return ori;
 }
 
-// ---------- 空间管理器（优化切割 + 合并）----------
-class SpaceManager {
-  constructor(tw, td, th) {
-    this.spaces = [{ x:0, y:0, z:0, w:tw, d:td, h:th, isFloor:true }];
-    this.tw = tw; this.td = td; this.th = th;
-  }
+// ==================== 高度图装箱算法 ====================
+function packWithHeightmap(tw, td, th, items, maxTrials = 1) {
+  let bestPlaced = [];
+  let bestSteps = [];
+  let maxCount = 0;
 
-  mergeSpaces() {
-    let merged = true;
-    while (merged) {
-      merged = false;
-      for (let i = 0; i < this.spaces.length; i++) {
-        const a = this.spaces[i];
-        for (let j = i+1; j < this.spaces.length; j++) {
-          const b = this.spaces[j];
-          if (a.isFloor !== b.isFloor) continue;
-          // 上下合并 (x,z,w,d相同)
-          if (a.x===b.x && a.z===b.z && a.w===b.w && a.d===b.d) {
-            if (a.y+a.h===b.y) { a.h+=b.h; this.spaces.splice(j,1); merged=true; break; }
-            if (b.y+b.h===a.y) { a.y=b.y; a.h+=b.h; this.spaces.splice(j,1); merged=true; break; }
-          }
-          // 前后合并 (x,y,w,h相同)
-          if (a.x===b.x && a.y===b.y && a.w===b.w && a.h===b.h) {
-            if (a.z+a.d===b.z) { a.d+=b.d; this.spaces.splice(j,1); merged=true; break; }
-            if (b.z+b.d===a.z) { a.z=b.z; a.d+=b.d; this.spaces.splice(j,1); merged=true; break; }
-          }
-          // 左右合并 (y,z,d,h相同)
-          if (a.y===b.y && a.z===b.z && a.d===b.d && a.h===b.h) {
-            if (a.x+a.w===b.x) { a.w+=b.w; this.spaces.splice(j,1); merged=true; break; }
-            if (b.x+b.w===a.x) { a.x=b.x; a.w+=b.w; this.spaces.splice(j,1); merged=true; break; }
-          }
-        }
-        if (merged) break;
-      }
-    }
-  }
-
-  isTopSpace(space) {
-    return Math.abs(space.y + space.h - this.th) < 0.01;
-  }
-
-  queryAllPlacements(originalW, originalD, originalH) {
-    this.mergeSpaces();
-    const candidates = [];
-    for (let i = 0; i < this.spaces.length; i++) {
-      const s = this.spaces[i];
-      if (s.isFloor && s.y > 0) continue; // 悬空地板不允许
-      const topLayer = this.isTopSpace(s);
-      const orientations = getAllowedOrientations(originalW, originalD, originalH, topLayer);
-      for (let [ow, od, oh] of orientations) {
-        if (ow <= s.w && od <= s.d && oh <= s.h) {
-          // 计算放置后剩余空间的最小维度（模拟切割）
-          const rem = [];
-          if (s.w - ow > 0) rem.push({ w: s.w-ow, d: s.d, h: s.h });
-          if (s.h - oh > 0) rem.push({ w: s.w, d: s.d, h: s.h-oh }); // ★上方全宽
-          if (s.d - od > 0) rem.push({ w: ow, d: s.d-od, h: s.h }); // ★前方全高
-          let minDim = rem.length ? Math.min(...rem.map(r => Math.min(r.w, r.d, r.h))) : 0;
-
-          let contact = 0;
-          if (s.z === 0) contact += ow * oh;
-          if (s.y === 0 && s.isFloor) contact += ow * od;
-          if (s.x === 0) contact += od * oh;
-          if (!s.isFloor) contact += ow * od;
-
-          candidates.push({ spaceIdx: i, bw:ow, bd:od, bh:oh, minDim, contact, volume: ow*od*oh });
-        }
-      }
-    }
-    return candidates;
-  }
-
-  applyPlace(spaceIdx, bw, bd, bh) {
-    const s = this.spaces[spaceIdx];
-    const pos = { x: s.x, y: s.y, z: s.z };
-    const newSpaces = [];
-    // 右侧 (全深全高)
-    if (s.w - bw > 0) newSpaces.push({ x: s.x+bw, y: s.y, z: s.z, w: s.w-bw, d: s.d, h: s.h, isFloor: s.isFloor });
-    // 上方 (全宽全深)
-    if (s.h - bh > 0) newSpaces.push({ x: s.x, y: s.y+bh, z: s.z, w: s.w, d: s.d, h: s.h-bh, isFloor: false });
-    // 前方 (宽高同箱子)
-    if (s.d - bd > 0) newSpaces.push({ x: s.x, y: s.y, z: s.z+bd, w: bw, d: s.d-bd, h: s.h, isFloor: s.isFloor });
-
-    this.spaces.splice(spaceIdx, 1);
-    this.spaces.push(...newSpaces);
-    this.mergeSpaces();
-    return pos;
-  }
-}
-
-// ---------- 单次贪心放置 ----------
-function runGreedy(tw, td, th, items) {
-  const sm = new SpaceManager(tw, td, th);
-  const placed = [];
-  const steps = [];
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    const cands = sm.queryAllPlacements(item.w, item.d, item.h);
-    if (cands.length === 0) return { success: false, placed: [] };
-
-    // 评分：体积(0.01)+接触(0.3)+最小维度(1.0)
-    let best = cands[0];
-    let bestScore = -Infinity;
-    for (let c of cands) {
-      const score = c.volume*0.01 + c.contact*0.3 + c.minDim*1.0;
-      if (score > bestScore) { bestScore = score; best = c; }
-    }
-    const pos = sm.applyPlace(best.spaceIdx, best.bw, best.bd, best.bh);
-    placed.push({ name: item.name, x:pos.x, y:pos.y, z:pos.z, w:best.bw, d:best.bd, h:best.bh });
-    steps.push(`${item.name} 于 (${pos.x},${pos.y},${pos.z}) ${best.bw}×${best.bd}×${best.bh}${best.bh!==item.h?'(侧放)':''}`);
-  }
-  return { success: true, placed, steps };
-}
-
-// ---------- 多次随机贪心 ----------
-function multiRandomPack(tw, td, th, boxes, maxTrials = 50) {
-  // 展开所有箱子
-  const baseItems = [];
-  for (let box of boxes) {
-    for (let i = 0; i < box.count; i++) {
-      baseItems.push({ name: box.name, w: box.w, d: box.d, h: box.h });
-    }
-  }
-  // 按体积降序作为基础顺序
-  baseItems.sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
-
-  let bestResult = null;
-  let bestPlaced = 0;
-
+  const totalItems = items.length;
+  // 多次随机尝试
   for (let trial = 0; trial < maxTrials; trial++) {
-    // 打乱同体积的箱子顺序（但保持大致降序）
-    const items = [...baseItems];
-    // 随机洗牌 (Fisher–Yates)
-    for (let i = items.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [items[i], items[j]] = [items[j], items[i]];
+    // 随机打乱顺序（但保持大致体积降序）
+    const shuffled = [...items].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+    // 轻微洗牌：相邻体积的可以交换
+    for (let i = shuffled.length-1; i>0; i--) {
+      if (Math.random() < 0.5) {
+        const j = Math.floor(Math.random() * (i+1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
     }
-    const result = runGreedy(tw, td, th, items);
-    if (result.success) {
-      return result; // 成功装入所有箱子，立即返回
+
+    const heightMap = Array(tw).fill().map(() => Array(td).fill(0)); // 0表示地板高度
+    const placed = [];
+    const steps = [];
+
+    for (let item of shuffled) {
+      let bestPos = null;
+      let bestOri = null;
+
+      // 检查是否最顶层（当前高度图最高点是否已到th，我们不需要单独判断顶层，而是尝试所有方向，只要最终y+oh<=th）
+      // 遍历所有可能的方向，寻找最低的平坦区域
+      const orientations = [[item.w, item.d, item.h]];
+      if (item.w !== item.d) orientations.push([item.d, item.w, item.h]);
+      // 允许侧放的条件：车厢未满时也可以，但为简化我们先只允许竖放和水平旋转，提高稳定性
+      // 若想最大化填充率，可以加入所有方向（仅当最高度接近th时），这里为了稳定，先只使用两种竖放。
+      // 根据之前要求，最顶层允许倒下，我们可以在高度图达到一定高度后启用所有方向。
+      const maxH = Math.max(...heightMap.flat());
+      const topLayer = (maxH + Math.max(item.w, item.d, item.h) >= th); // 简单判断
+      const finalOris = topLayer ? getAllowedOrientations(item.w, item.d, item.h, true) : orientations;
+
+      for (let [ow, od, oh] of finalOris) {
+        if (ow > tw || od > td) continue;
+        // 扫描高度图，寻找平坦区域
+        for (let z = 0; z <= td - od; z++) { // 优先车头（z小）
+          for (let x = 0; x <= tw - ow; x++) {
+            // 检查该矩形区域是否平坦（所有高度相同）
+            const baseH = heightMap[x][z];
+            if (baseH + oh > th) continue;
+            let flat = true;
+            for (let dx = 0; dx < ow && flat; dx++) {
+              for (let dz = 0; dz < od && flat; dz++) {
+                if (heightMap[x+dx][z+dz] !== baseH) {
+                  flat = false;
+                }
+              }
+            }
+            if (flat) {
+              // 如果找到，选择最低的baseH，若相同则选择z最小的（车头），这里因为循环顺序已优先z小，所以第一个平坦区域就是车头最低处。
+              // 由于我们是按z优先扫描，直接取第一个即可，无需比较。
+              bestPos = { x, z, y: baseH };
+              bestOri = [ow, od, oh];
+              // 跳出所有循环
+              x = tw; z = td; // 跳出
+            }
+          }
+        }
+        if (bestPos) break;
+      }
+
+      if (!bestPos) {
+        // 无法放置此箱子，本次尝试失败
+        break;
+      }
+
+      const [ow, od, oh] = bestOri;
+      const { x, y, z } = bestPos;
+
+      // 更新高度图
+      for (let dx = 0; dx < ow; dx++) {
+        for (let dz = 0; dz < od; dz++) {
+          heightMap[x+dx][z+dz] = y + oh;
+        }
+      }
+
+      placed.push({ name: item.name, x, y, z, w: ow, d: od, h: oh });
+      steps.push(`${item.name} 放置于 (${x},${y},${z}) 尺寸 ${ow}×${od}×${oh}${oh!==item.h?'(侧放)':''}`);
     }
-    if (result.placed.length > bestPlaced) {
-      bestPlaced = result.placed.length;
-      bestResult = result;
+
+    if (placed.length > maxCount) {
+      maxCount = placed.length;
+      bestPlaced = placed;
+      bestSteps = steps;
     }
+    if (maxCount === totalItems) break; // 已经全部装入
   }
-  return bestResult; // 返回装入最多箱子的结果
+
+  return { placed: bestPlaced, steps: bestSteps, total: totalItems, success: maxCount === totalItems };
 }
 
-// ---------- 截面验证 ----------
+// ==================== 截面验证 ====================
 function verifySlices(placed, tw, th, step = 10) {
   const maxZ = Math.max(...placed.map(p => p.z + p.d));
   for (let z = 0; z <= maxZ; z += step) {
@@ -231,7 +180,7 @@ function verifySlices(placed, tw, th, step = 10) {
   return { valid: true };
 }
 
-// ---------- 3D 渲染 ----------
+// ==================== 3D 渲染 ====================
 let scene, camera, renderer, controls;
 function init3D() {
   const container = document.getElementById('viewer');
@@ -274,7 +223,7 @@ function clearScene() {
   const l = new THREE.DirectionalLight(0xffffff,0.8); l.position.set(300,500,400); scene.add(l);
 }
 
-// ---------- UI ----------
+// ==================== UI ====================
 function addBoxRow(name='',w='',d='',h='',cnt=''){
   const div = document.createElement('div'); div.className='box-row';
   div.innerHTML = `<input class="boxName" placeholder="名称" value="${name}"><input class="boxW" type="number" placeholder="宽" value="${w}"><input class="boxD" type="number" placeholder="深" value="${d}"><input class="boxH" type="number" placeholder="高" value="${h}"><input class="boxCount" type="number" placeholder="数量" value="${cnt}"><button class="delBox">✕</button>`;
@@ -299,28 +248,31 @@ async function calculate() {
   if (!tw||!td||!th||!boxes.length) return alert('请填完整');
   const mode = document.getElementById('mode').value;
 
-  let result;
+  // 展开所有箱子
+  const baseItems = [];
+  for (let box of boxes) {
+    for (let i = 0; i < box.count; i++) {
+      baseItems.push({ name: box.name, w: box.w, d: box.d, h: box.h });
+    }
+  }
+
   const startTime = performance.now();
-  if (mode === 'multi') {
-    result = multiRandomPack(tw, td, th, boxes, 100); // 尝试100次
+  let result;
+  if (mode === 'heightmap') {
+    result = packWithHeightmap(tw, td, th, baseItems, 50); // 50次随机尝试
   } else {
-    const items = [];
-    for (let box of boxes) for (let i=0;i<box.count;i++) items.push({name:box.name, w:box.w, d:box.d, h:box.h});
-    items.sort((a,b)=>(b.w*b.d*b.h)-(a.w*a.d*a.h));
-    result = runGreedy(tw, td, th, items);
+    result = packWithHeightmap(tw, td, th, baseItems, 1);
   }
   const endTime = performance.now();
 
-  if (!result || !result.success) {
-    document.getElementById('resultText').textContent = `❌ 未装下全部箱子（装入${result?.placed.length || 0}个），耗时${((endTime-startTime)/1000).toFixed(2)}s`;
-    // 仍然显示部分结果供分析
-    if (result?.placed.length > 0) {
+  if (!result.success) {
+    document.getElementById('resultText').textContent = `❌ 未装下全部箱子（${result.placed.length}/${result.total}），耗时${((endTime-startTime)/1000).toFixed(2)}s`;
+    if (result.placed.length > 0) {
       clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
     }
     return;
   }
 
-  // 截面验证
   const verify = verifySlices(result.placed, tw, th, 10);
   if (!verify.valid) {
     document.getElementById('resultText').textContent = `❌ 截面验证失败：z=${verify.z} 面积${verify.totalArea} > ${verify.maxArea}`;
