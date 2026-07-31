@@ -478,15 +478,11 @@
                 // 其实可以直接调用 drawTruckOutline，但它在模块内。我们可以通过事件触发。
                 // 简单方法：重新初始化整个 3D 场景（会清空）
                 // 为了保持简单，我们重新初始化 3D
-                const container = document.getElementById('3d-container');
-                if (container) {
-                    // 销毁旧场景
-                    if (window.boxesGroup) {
-                        // 清理逻辑可以在模块内提供一个函数，但这里用全局重新初始化
-                        location.reload(); // 简单粗暴，但会丢失输入。不推荐。
-                        // 更好的做法：在模块内暴露一个函数 updatePlacements，这里调用。
-                    }
-                }
+               // 调用 3D 模块提供的函数，直接更新箱子（不刷新页面）
+if (typeof window.buildBoxMeshes === 'function') {
+    window.buildBoxMeshes(lastPlacements);
+    document.getElementById('btnAnimate').disabled = false;
+}
                 // 由于模块作用域限制，这里我们换个方式：直接在 HTML 里重新触发 3D 构建。
                 // 我们将在后面修改代码，把 buildBoxMeshes 暴露为全局函数。
                 // 现在调用全局函数（如果存在）
