@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 反馈修复版</title>
+  <title>货车装箱 - 边界点算法</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
@@ -38,8 +38,8 @@
     <div style="margin-top:15px;">
       <label>算法</label>
       <select id="mode">
-        <option value="heightmap" selected>快速高度图 (推荐)</option>
-        <option value="heightmap-fast">单次尝试</option>
+        <option value="fast" selected>快速模式 (5次随机)</option>
+        <option value="single">单次模式</option>
       </select>
     </div>
     <button id="calcBtn">🚛 开始计算</button>
@@ -57,7 +57,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // =============== 方向 ===============
-function getOrientations(w, d, h, canTilt) {
+function getOrientations(w,d,h, canTilt) {
   const ori = [[w,d,h]];
   if (w !== d) ori.push([d,w,h]);
   if (canTilt) {
@@ -67,73 +67,83 @@ function getOrientations(w, d, h, canTilt) {
   return ori;
 }
 
-// =============== 快速高度图装箱器 ===============
-class HeightmapPacker {
+// =============== 边界点缓存装箱器 ===============
+class FastPacker {
   constructor(tw, td, th) {
     this.tw = tw; this.td = td; this.th = th;
     this.height = Array(tw).fill().map(() => Array(td).fill(0));
-    this.corners = new Map();
-    this.addCorner(0, 0, 0);
+    // 边界点集合：存储所有可能成为平坦区域左下角的点
+    this.corners = new Set();
+    this.corners.add('0,0');
+    // 用于快速移除被覆盖的点
+    this.covered = new Set();
   }
 
-  addCorner(x, z, h) {
-    const key = `${x},${z}`;
-    if (!this.corners.has(key) || this.corners.get(key).h > h) {
-      this.corners.set(key, {x, z, h});
+  // 检查矩形区域 (x,z,w,d) 是否所有格子高度 == h
+  isFlat(x, z, w, d, h) {
+    for (let dx = 0; dx < w; dx++) {
+      for (let dz = 0; dz < d; dz++) {
+        if (this.height[x+dx][z+dz] !== h) return false;
+      }
     }
+    return true;
   }
 
-  removeCorner(x, z) {
-    this.corners.delete(`${x},${z}`);
-  }
-
-  updateCornersAfterPlacement(px, pz, pw, pd, newHeight) {
+  // 放置箱子后更新边界点
+  updateCorners(px, pz, pw, pd, nh) {
+    // 移除被箱子覆盖的边界点
     for (let dx = 0; dx < pw; dx++) {
       for (let dz = 0; dz < pd; dz++) {
-        this.removeCorner(px + dx, pz + dz);
+        this.corners.delete(`${px+dx},${pz+dz}`);
       }
     }
+    // 右侧边界新点：位置(px+pw, z)，高度=height[px+pw][z]
     if (px + pw < this.tw) {
       for (let dz = 0; dz < pd; dz++) {
-        let z = pz + dz;
-        this.addCorner(px + pw, z, this.height[px + pw][z]);
+        const z = pz + dz;
+        const key = `${px+pw},${z}`;
+        this.corners.add(key);
       }
     }
+    // 前方边界新点：位置(x, pz+pd)
     if (pz + pd < this.td) {
       for (let dx = 0; dx < pw; dx++) {
-        let x = px + dx;
-        this.addCorner(x, pz + pd, this.height[x][pz + pd]);
+        const x = px + dx;
+        const key = `${x},${pz+pd}`;
+        this.corners.add(key);
       }
     }
+    // 外角点
     if (px + pw < this.tw && pz + pd < this.td) {
-      this.addCorner(px + pw, pz + pd, this.height[px+pw][pz+pd]);
+      this.corners.add(`${px+pw},${pz+pd}`);
     }
   }
 
+  // 寻找放置位置
   findPlacement(bw, bd, bh, canTilt) {
     const oris = getOrientations(bw, bd, bh, canTilt);
-    const sortedCorners = Array.from(this.corners.values()).sort(
-      (a,b) => a.h - b.h || a.z - b.z || a.x - b.x
-    );
-    for (let corner of sortedCorners) {
-      const {x, z, h} = corner;
+    // 将边界点转为数组并按高度、z、x排序
+    const points = Array.from(this.corners).map(s => {
+      const [x, z] = s.split(',').map(Number);
+      return { x, z, h: this.height[x][z] };
+    }).sort((a,b) => a.h - b.h || a.z - b.z || a.x - b.x);
+
+    for (let pt of points) {
+      const {x, z, h} = pt;
       if (x + bw > this.tw || z + bd > this.td) continue;
-      let flat = true;
-      for (let dx = 0; dx < bw && flat; dx++) {
-        for (let dz = 0; dz < bd && flat; dz++) {
-          if (this.height[x+dx][z+dz] !== h) flat = false;
-        }
-      }
-      if (!flat) continue;
+      if (h + bh > this.th) continue;
+      if (!this.isFlat(x, z, bw, bd, h)) continue;
+      // 尝试每个方向（宽度和深度必须匹配bw,bd）
       for (let [ow, od, oh] of oris) {
-        if (ow > bw || od > bd) continue;
-        if (h + oh > this.th) continue;
-        return { x, z, y: h, ow, od, oh };
+        if (ow === bw && od === bd && h + oh <= this.th) {
+          return { x, z, y: h, ow, od, oh };
+        }
       }
     }
     return null;
   }
 
+  // 放置箱子，更新高度图和边界点
   placeBox(x, z, ow, od, oh) {
     const y = this.height[x][z];
     for (let dx = 0; dx < ow; dx++) {
@@ -141,67 +151,64 @@ class HeightmapPacker {
         this.height[x+dx][z+dz] = y + oh;
       }
     }
-    this.updateCornersAfterPlacement(x, z, ow, od, y + oh);
+    this.updateCorners(x, z, ow, od, y + oh);
     return { x, y, z, w: ow, d: od, h: oh };
   }
 }
 
+// =============== 单次装箱 ===============
+function singlePack(tw, td, th, items) {
+  const packer = new FastPacker(tw, td, th);
+  const placed = [];
+  const steps = [];
+  for (let item of items) {
+    const maxH = Math.max(...packer.height.flat());
+    const canTilt = (maxH + Math.max(item.w, item.d, item.h) >= th);
+    const pos = packer.findPlacement(item.w, item.d, item.h, canTilt);
+    if (!pos) return { success: false, placed };
+    const box = packer.placeBox(pos.x, pos.z, pos.ow, pos.od, pos.oh);
+    placed.push({ name: item.name, x: box.x, y: box.y, z: box.z, w: box.w, d: box.d, h: box.h });
+    steps.push(`${item.name} 于 (${box.x},${box.y},${box.z}) ${box.w}×${box.d}×${box.h}${box.h!==item.h?'(侧放)':''}`);
+  }
+  return { success: true, placed, steps };
+}
+
 // =============== 多次随机贪心 ===============
-function packWithHeightmap(tw, td, th, baseItems, maxTrials = 50) {
+function packMultiple(tw, td, th, baseItems, trials = 5) {
+  const total = baseItems.length;
   let bestPlaced = [];
   let bestSteps = [];
-  let totalItems = baseItems.length;
   let bestCount = 0;
 
-  for (let trial = 0; trial < maxTrials; trial++) {
+  for (let t = 0; t < trials; t++) {
+    // 随机打乱（体积降序 + 轻微洗牌）
     const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
     for (let i = items.length - 1; i > 0; i--) {
-      if (Math.random() < 0.4) {
+      if (Math.random() < 0.5) {
         const j = Math.floor(Math.random() * (i + 1));
         [items[i], items[j]] = [items[j], items[i]];
       }
     }
-
-    const packer = new HeightmapPacker(tw, td, th);
-    const placed = [];
-    const steps = [];
-    let success = true;
-
-    for (let item of items) {
-      const maxH = Math.max(...packer.height.flat());
-      const canTilt = (maxH + Math.max(item.w, item.d, item.h) >= th);
-      const placement = packer.findPlacement(item.w, item.d, item.h, canTilt);
-      if (!placement) {
-        success = false;
-        break;
-      }
-      const box = packer.placeBox(placement.x, placement.z, placement.ow, placement.od, placement.oh);
-      placed.push({ name: item.name, x: box.x, y: box.y, z: box.z, w: box.w, d: box.d, h: box.h });
-      steps.push(`${item.name} 放置于 (${box.x},${box.y},${box.z}) 尺寸 ${box.w}×${box.d}×${box.h}${box.h!==item.h?'(侧放)':''}`);
-    }
-
-    if (success) {
-      return { placed, steps, total: totalItems, success: true };
-    }
-    if (placed.length > bestCount) {
-      bestCount = placed.length;
-      bestPlaced = placed;
-      bestSteps = steps;
+    const res = singlePack(tw, td, th, items);
+    if (res.success) return res; // 成功即返回
+    if (res.placed.length > bestCount) {
+      bestCount = res.placed.length;
+      bestPlaced = res.placed;
+      bestSteps = res.steps;
     }
   }
-
-  return { placed: bestPlaced, steps: bestSteps, total: totalItems, success: false };
+  return { success: false, placed: bestPlaced, steps: bestSteps, total };
 }
 
 // =============== 截面验证 ===============
-function verifySlices(placed, tw, th, step = 10) {
+function verifySlices(placed, tw, th) {
   const maxZ = Math.max(...placed.map(p => p.z + p.d));
-  for (let z = 0; z <= maxZ; z += step) {
-    let totalArea = 0;
+  for (let z = 0; z <= maxZ; z += 10) {
+    let area = 0;
     for (let p of placed) {
-      if (p.z <= z && p.z + p.d > z) totalArea += p.w * p.h;
+      if (p.z <= z && p.z + p.d > z) area += p.w * p.h;
     }
-    if (totalArea > tw * th + 0.01) return { valid: false, z, totalArea, maxArea: tw * th };
+    if (area > tw * th + 0.01) return { valid: false, z, area };
   }
   return { valid: true };
 }
@@ -266,7 +273,7 @@ function getBoxes() {
   })).filter(b => b.w>0 && b.d>0 && b.h>0 && b.count>0);
 }
 
-// =============== 计算核心（带加载反馈）===============
+// =============== 计算（带反馈）===============
 async function calculate() {
   const tw = +document.getElementById('tw').value;
   const td = +document.getElementById('td').value;
@@ -274,14 +281,12 @@ async function calculate() {
   const boxes = getBoxes();
   if (!tw||!td||!th||!boxes.length) return alert('请填完整');
   const mode = document.getElementById('mode').value;
-
   const calcBtn = document.getElementById('calcBtn');
   const resultDiv = document.getElementById('resultText');
   calcBtn.disabled = true;
-  calcBtn.textContent = '⏳ 计算中...';
-  resultDiv.textContent = '正在计算，请稍候...';
+  calcBtn.textContent = '⏳ 计算中…';
+  resultDiv.textContent = '正在计算，请稍候…';
 
-  // 展开所有箱子
   const baseItems = [];
   for (let box of boxes) {
     for (let i = 0; i < box.count; i++) {
@@ -289,46 +294,37 @@ async function calculate() {
     }
   }
 
-  // 使用setTimeout让UI更新，避免界面冻结
+  // 异步运行装箱
   setTimeout(() => {
     const startTime = performance.now();
     let result;
-    if (mode === 'heightmap') {
-      result = packWithHeightmap(tw, td, th, baseItems, 50);
+    if (mode === 'fast') {
+      result = packMultiple(tw, td, th, baseItems, 5);
     } else {
-      result = packWithHeightmap(tw, td, th, baseItems, 1);
+      const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+      result = singlePack(tw, td, th, items);
     }
-    const endTime = performance.now();
+    const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
 
     if (!result.success) {
-      resultDiv.textContent = 
-        `❌ 未装下全部箱子 (${result.placed.length}/${result.total})，耗时${((endTime-startTime)/1000).toFixed(2)}s`;
-      if (result.placed.length > 0) {
+      const placedCount = result.placed ? result.placed.length : 0;
+      resultDiv.textContent = `❌ 未装下全部箱子 (${placedCount}/${baseItems.length})，耗时${elapsed}s`;
+      if (result.placed && result.placed.length > 0) {
         clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
       }
-      calcBtn.disabled = false;
-      calcBtn.textContent = '🚛 开始计算';
-      return;
+    } else {
+      const verify = verifySlices(result.placed, tw, th);
+      if (!verify.valid) {
+        resultDiv.textContent = `❌ 截面验证失败：z=${verify.z} 面积${verify.area} > ${tw*th}`;
+      } else {
+        const fillRate = (result.placed.reduce((s,p)=>s+p.w*p.d*p.h,0) / (tw*td*th) * 100).toFixed(1);
+        resultDiv.textContent = `✅ 全部装入 ${result.placed.length} 箱 耗时${elapsed}s\n填充率: ${fillRate}%  截面验证: 通过\n` + result.steps.join('\n');
+        clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
+      }
     }
-
-    const verify = verifySlices(result.placed, tw, th, 10);
-    if (!verify.valid) {
-      resultDiv.textContent = `❌ 截面验证失败：z=${verify.z} 面积${verify.totalArea} > ${verify.maxArea}`;
-      calcBtn.disabled = false;
-      calcBtn.textContent = '🚛 开始计算';
-      return;
-    }
-
-    const fillRate = (result.placed.reduce((s,p)=>s+p.w*p.d*p.h,0) / (tw*td*th) * 100).toFixed(1);
-    resultDiv.textContent = 
-      `✅ 全部装入 (${result.placed.length}箱) 耗时${((endTime-startTime)/1000).toFixed(2)}s\n` +
-      `填充率: ${fillRate}%  截面验证: 通过\n` +
-      result.steps.join('\n');
-
-    clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
     calcBtn.disabled = false;
     calcBtn.textContent = '🚛 开始计算';
-  }, 50);
+  }, 20);
 }
 
 // 默认数据
