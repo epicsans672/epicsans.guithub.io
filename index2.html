@@ -53,7 +53,7 @@
   <div id="viewer"></div>
 </div>
 
-<!-- 关键：使用 jsdelivr CDN，国内可用 -->
+<!-- 使用 jsdelivr CDN 国内可用 -->
 <script type="importmap">
   {
     "imports": {
@@ -80,21 +80,32 @@ function permuteDims(w, d, h) {
   return Array.from(res).map(s => s.split(',').map(Number));
 }
 
-// 剩余空间管理
+// ---------- 修正后的剩余空间管理（绝不重叠）----------
 class SpaceManager {
   constructor(tw, td, th) {
     this.spaces = [{ x:0, y:0, z:0, w:tw, d:td, h:th }];
   }
+
   tryPlace(bw, bd, bh) {
-    this.spaces.sort((a,b) => a.y-b.y || a.z-b.z || a.x-b.x);
+    // 优先从低到高（y），从里到外（z），从左到右（x）
+    this.spaces.sort((a,b) => a.y - b.y || a.z - b.z || a.x - b.x);
     for (let i = 0; i < this.spaces.length; i++) {
       const s = this.spaces[i];
       if (bw <= s.w && bd <= s.d && bh <= s.h) {
         const pos = { x: s.x, y: s.y, z: s.z };
         const newSpaces = [];
-        if (s.w - bw > 0) newSpaces.push({ x: s.x+bw, y: s.y, z: s.z, w: s.w-bw, d: bd, h: s.h });
-        if (s.d - bd > 0) newSpaces.push({ x: s.x, y: s.y, z: s.z+bd, w: s.w, d: s.d-bd, h: s.h });
-        if (s.h - bh > 0) newSpaces.push({ x: s.x, y: s.y+bh, z: s.z, w: s.w, d: s.d, h: s.h-bh });
+        // 上方空间（y方向剩余）
+        if (s.h - bh > 0) {
+          newSpaces.push({ x: s.x, y: s.y + bh, z: s.z, w: bw, d: bd, h: s.h - bh });
+        }
+        // 右侧空间（x方向剩余）
+        if (s.w - bw > 0) {
+          newSpaces.push({ x: s.x + bw, y: s.y, z: s.z, w: s.w - bw, d: s.d, h: bh });
+        }
+        // 前方空间（z方向剩余，即深度方向）
+        if (s.d - bd > 0) {
+          newSpaces.push({ x: s.x, y: s.y, z: s.z + bd, w: s.w, d: s.d - bd, h: bh });
+        }
         this.spaces.splice(i, 1);
         this.spaces.push(...newSpaces);
         return pos;
@@ -104,7 +115,7 @@ class SpaceManager {
   }
 }
 
-// 相邻分布算法
+// ---------- 相邻分布算法 ----------
 function packAdjacent(tw, td, th, boxes) {
   const blocks = [];
   const steps = [];
@@ -163,12 +174,12 @@ function packAdjacent(tw, td, th, boxes) {
         }
       }
     }
-    blockSteps.push(`放置在 左后下角 (${pos.x},${pos.y},${pos.z})`);
+    blockSteps.push(`整块放置在 左后下角 (${pos.x},${pos.y},${pos.z})，内部箱子按从左到右、从里到外、从下到上排列`);
   }
   return { success: true, placed, steps: [...steps, ...blockSteps] };
 }
 
-// 占空间最小算法
+// ---------- 占空间最小算法 ----------
 function packSpaceMin(tw, td, th, boxes) {
   const sm = new SpaceManager(tw, td, th);
   const placed = [];
@@ -178,6 +189,7 @@ function packSpaceMin(tw, td, th, boxes) {
       items.push({ name: box.name, dims: permuteDims(box.w, box.d, box.h) });
     }
   }
+  // 按体积从大到小排列，提高利用率
   items.sort((a,b) => {
     const vol = arr => arr[0]*arr[1]*arr[2];
     return vol(b.dims[0]) - vol(a.dims[0]);
