@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 高度图算法</title>
+  <title>货车装箱 - 快速高度图</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
@@ -37,8 +37,8 @@
     <div style="margin-top:15px;">
       <label>算法</label>
       <select id="mode">
-        <option value="heightmap" selected>高度图算法 (推荐)</option>
-        <option value="heightmap-fast">快速模式 (单次)</option>
+        <option value="heightmap" selected>快速高度图 (推荐)</option>
+        <option value="heightmap-fast">单次尝试</option>
       </select>
     </div>
     <button id="calcBtn">🚛 开始计算</button>
@@ -55,132 +55,182 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ==================== 工具：方向 ====================
-function getAllowedOrientations(w,d,h, isTopLayer) {
+// =============== 方向 ===============
+function getOrientations(w, d, h, canTilt) {
   const ori = [[w,d,h]];
   if (w !== d) ori.push([d,w,h]);
-  if (isTopLayer) {
+  if (canTilt) {
     const all = [[w,d,h],[d,w,h],[w,h,d],[h,w,d],[d,h,w],[h,d,w]];
     return Array.from(new Set(all.map(a=>a.join(',')))).map(s=>s.split(',').map(Number));
   }
   return ori;
 }
 
-// ==================== 高度图装箱算法 ====================
-function packWithHeightmap(tw, td, th, items, maxTrials = 1) {
+// =============== 快速高度图装箱器 ===============
+class HeightmapPacker {
+  constructor(tw, td, th) {
+    this.tw = tw; this.td = td; this.th = th;
+    this.height = Array(tw).fill().map(() => Array(td).fill(0));
+    // 平坦区域缓存：每个高度记录一个二维网格是否平坦（这里简化，不缓存，但用增量更新思路）
+    // 为了提高速度，我们使用角落列表：存储所有可能的放置角落（矩形区域的左下角）
+    // 初始角落是整个车厢底面 (0,0)
+    this.corners = new Map(); // key: 'x,z', value: {x,z,h}
+    this.addCorner(0, 0, 0);
+  }
+
+  addCorner(x, z, h) {
+    const key = `${x},${z}`;
+    // 只保留最低的角落（同一位置可能有多个高度，取最小的那个）
+    if (!this.corners.has(key) || this.corners.get(key).h > h) {
+      this.corners.set(key, {x, z, h});
+    }
+  }
+
+  removeCorner(x, z) {
+    this.corners.delete(`${x},${z}`);
+  }
+
+  // 重新计算某个区域影响的角落（放置箱子后）
+  updateCornersAfterPlacement(px, pz, pw, pd, newHeight) {
+    // 移除被箱子覆盖区域的角落
+    for (let dx = 0; dx < pw; dx++) {
+      for (let dz = 0; dz < pd; dz++) {
+        this.removeCorner(px + dx, pz + dz);
+      }
+    }
+    // 在箱子边缘外侧新增角落（右侧和前方）
+    // 右侧 x = px + pw
+    if (px + pw < this.tw) {
+      for (let dz = 0; dz < pd; dz++) {
+        let z = pz + dz;
+        // 高度取该列相邻格子的高度（因为右侧可能高度不同）
+        let h = this.height[px + pw][z];
+        this.addCorner(px + pw, z, h);
+      }
+    }
+    // 前方 z = pz + pd
+    if (pz + pd < this.td) {
+      for (let dx = 0; dx < pw; dx++) {
+        let x = px + dx;
+        let h = this.height[x][pz + pd];
+        this.addCorner(x, pz + pd, h);
+      }
+    }
+    // 外侧角点 (px+pw, pz+pd)
+    if (px + pw < this.tw && pz + pd < this.td) {
+      this.addCorner(px + pw, pz + pd, this.height[px+pw][pz+pd]);
+    }
+  }
+
+  // 寻找可放置的位置
+  findPlacement(bw, bd, bh, canTilt) {
+    const oris = getOrientations(bw, bd, bh, canTilt);
+    let best = null;
+    // 遍历所有角落，按高度优先、z优先、x优先
+    const sortedCorners = Array.from(this.corners.values()).sort(
+      (a,b) => a.h - b.h || a.z - b.z || a.x - b.x
+    );
+    for (let corner of sortedCorners) {
+      const {x, z, h} = corner;
+      if (x + bw > this.tw || z + bd > this.td) continue;
+      // 检查底面平坦（所有格子高度等于h）
+      let flat = true;
+      for (let dx = 0; dx < bw && flat; dx++) {
+        for (let dz = 0; dz < bd && flat; dz++) {
+          if (this.height[x+dx][z+dz] !== h) flat = false;
+        }
+      }
+      if (!flat) continue;
+      // 尝试每种方向
+      for (let [ow, od, oh] of oris) {
+        if (ow > bw || od > bd) continue; // 矩形已限定为bw*bd，这里ow,od必须匹配
+        if (h + oh > this.th) continue;
+        // 找到合法放置
+        return { x, z, y: h, ow, od, oh };
+      }
+    }
+    return null;
+  }
+
+  // 放置箱子并更新
+  placeBox(x, z, ow, od, oh) {
+    const y = this.height[x][z];
+    // 更新高度图
+    for (let dx = 0; dx < ow; dx++) {
+      for (let dz = 0; dz < od; dz++) {
+        this.height[x+dx][z+dz] = y + oh;
+      }
+    }
+    // 更新角落
+    this.updateCornersAfterPlacement(x, z, ow, od, y + oh);
+    return { x, y, z, w: ow, d: od, h: oh };
+  }
+}
+
+// =============== 多次随机贪心 ===============
+function packWithHeightmap(tw, td, th, baseItems, maxTrials = 50) {
   let bestPlaced = [];
   let bestSteps = [];
-  let maxCount = 0;
+  let totalItems = baseItems.length;
+  let bestCount = 0;
 
-  const totalItems = items.length;
-  // 多次随机尝试
   for (let trial = 0; trial < maxTrials; trial++) {
-    // 随机打乱顺序（但保持大致体积降序）
-    const shuffled = [...items].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
-    // 轻微洗牌：相邻体积的可以交换
-    for (let i = shuffled.length-1; i>0; i--) {
-      if (Math.random() < 0.5) {
-        const j = Math.floor(Math.random() * (i+1));
-        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    // 随机打乱顺序，但保持大致体积降序（大箱子先放）
+    const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+    // 轻微洗牌
+    for (let i = items.length - 1; i > 0; i--) {
+      if (Math.random() < 0.4) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [items[i], items[j]] = [items[j], items[i]];
       }
     }
 
-    const heightMap = Array(tw).fill().map(() => Array(td).fill(0)); // 0表示地板高度
+    const packer = new HeightmapPacker(tw, td, th);
     const placed = [];
     const steps = [];
+    let success = true;
 
-    for (let item of shuffled) {
-      let bestPos = null;
-      let bestOri = null;
-
-      // 检查是否最顶层（当前高度图最高点是否已到th，我们不需要单独判断顶层，而是尝试所有方向，只要最终y+oh<=th）
-      // 遍历所有可能的方向，寻找最低的平坦区域
-      const orientations = [[item.w, item.d, item.h]];
-      if (item.w !== item.d) orientations.push([item.d, item.w, item.h]);
-      // 允许侧放的条件：车厢未满时也可以，但为简化我们先只允许竖放和水平旋转，提高稳定性
-      // 若想最大化填充率，可以加入所有方向（仅当最高度接近th时），这里为了稳定，先只使用两种竖放。
-      // 根据之前要求，最顶层允许倒下，我们可以在高度图达到一定高度后启用所有方向。
-      const maxH = Math.max(...heightMap.flat());
-      const topLayer = (maxH + Math.max(item.w, item.d, item.h) >= th); // 简单判断
-      const finalOris = topLayer ? getAllowedOrientations(item.w, item.d, item.h, true) : orientations;
-
-      for (let [ow, od, oh] of finalOris) {
-        if (ow > tw || od > td) continue;
-        // 扫描高度图，寻找平坦区域
-        for (let z = 0; z <= td - od; z++) { // 优先车头（z小）
-          for (let x = 0; x <= tw - ow; x++) {
-            // 检查该矩形区域是否平坦（所有高度相同）
-            const baseH = heightMap[x][z];
-            if (baseH + oh > th) continue;
-            let flat = true;
-            for (let dx = 0; dx < ow && flat; dx++) {
-              for (let dz = 0; dz < od && flat; dz++) {
-                if (heightMap[x+dx][z+dz] !== baseH) {
-                  flat = false;
-                }
-              }
-            }
-            if (flat) {
-              // 如果找到，选择最低的baseH，若相同则选择z最小的（车头），这里因为循环顺序已优先z小，所以第一个平坦区域就是车头最低处。
-              // 由于我们是按z优先扫描，直接取第一个即可，无需比较。
-              bestPos = { x, z, y: baseH };
-              bestOri = [ow, od, oh];
-              // 跳出所有循环
-              x = tw; z = td; // 跳出
-            }
-          }
-        }
-        if (bestPos) break;
-      }
-
-      if (!bestPos) {
-        // 无法放置此箱子，本次尝试失败
+    for (let item of items) {
+      // 判断是否接近顶层（允许侧放）
+      const maxH = Math.max(...packer.height.flat());
+      const canTilt = (maxH + Math.max(item.w, item.d, item.h) >= th);
+      const placement = packer.findPlacement(item.w, item.d, item.h, canTilt);
+      if (!placement) {
+        success = false;
         break;
       }
-
-      const [ow, od, oh] = bestOri;
-      const { x, y, z } = bestPos;
-
-      // 更新高度图
-      for (let dx = 0; dx < ow; dx++) {
-        for (let dz = 0; dz < od; dz++) {
-          heightMap[x+dx][z+dz] = y + oh;
-        }
-      }
-
-      placed.push({ name: item.name, x, y, z, w: ow, d: od, h: oh });
-      steps.push(`${item.name} 放置于 (${x},${y},${z}) 尺寸 ${ow}×${od}×${oh}${oh!==item.h?'(侧放)':''}`);
+      const box = packer.placeBox(placement.x, placement.z, placement.ow, placement.od, placement.oh);
+      placed.push({ name: item.name, x: box.x, y: box.y, z: box.z, w: box.w, d: box.d, h: box.h });
+      steps.push(`${item.name} 放置于 (${box.x},${box.y},${box.z}) 尺寸 ${box.w}×${box.d}×${box.h}${box.h!==item.h?'(侧放)':''}`);
     }
 
-    if (placed.length > maxCount) {
-      maxCount = placed.length;
+    if (success) {
+      return { placed, steps, total: totalItems, success: true };
+    }
+    if (placed.length > bestCount) {
+      bestCount = placed.length;
       bestPlaced = placed;
       bestSteps = steps;
     }
-    if (maxCount === totalItems) break; // 已经全部装入
   }
 
-  return { placed: bestPlaced, steps: bestSteps, total: totalItems, success: maxCount === totalItems };
+  return { placed: bestPlaced, steps: bestSteps, total: totalItems, success: false };
 }
 
-// ==================== 截面验证 ====================
+// =============== 截面验证 ===============
 function verifySlices(placed, tw, th, step = 10) {
   const maxZ = Math.max(...placed.map(p => p.z + p.d));
   for (let z = 0; z <= maxZ; z += step) {
     let totalArea = 0;
     for (let p of placed) {
-      if (p.z <= z && p.z + p.d > z) {
-        totalArea += p.w * p.h;
-      }
+      if (p.z <= z && p.z + p.d > z) totalArea += p.w * p.h;
     }
-    if (totalArea > tw * th + 0.01) {
-      return { valid: false, z, totalArea, maxArea: tw * th };
-    }
+    if (totalArea > tw * th + 0.01) return { valid: false, z, totalArea, maxArea: tw * th };
   }
   return { valid: true };
 }
 
-// ==================== 3D 渲染 ====================
+// =============== 3D 渲染 ===============
 let scene, camera, renderer, controls;
 function init3D() {
   const container = document.getElementById('viewer');
@@ -223,7 +273,7 @@ function clearScene() {
   const l = new THREE.DirectionalLight(0xffffff,0.8); l.position.set(300,500,400); scene.add(l);
 }
 
-// ==================== UI ====================
+// =============== UI ===============
 function addBoxRow(name='',w='',d='',h='',cnt=''){
   const div = document.createElement('div'); div.className='box-row';
   div.innerHTML = `<input class="boxName" placeholder="名称" value="${name}"><input class="boxW" type="number" placeholder="宽" value="${w}"><input class="boxD" type="number" placeholder="深" value="${d}"><input class="boxH" type="number" placeholder="高" value="${h}"><input class="boxCount" type="number" placeholder="数量" value="${cnt}"><button class="delBox">✕</button>`;
@@ -259,14 +309,15 @@ async function calculate() {
   const startTime = performance.now();
   let result;
   if (mode === 'heightmap') {
-    result = packWithHeightmap(tw, td, th, baseItems, 50); // 50次随机尝试
+    result = packWithHeightmap(tw, td, th, baseItems, 50);
   } else {
     result = packWithHeightmap(tw, td, th, baseItems, 1);
   }
   const endTime = performance.now();
 
   if (!result.success) {
-    document.getElementById('resultText').textContent = `❌ 未装下全部箱子（${result.placed.length}/${result.total}），耗时${((endTime-startTime)/1000).toFixed(2)}s`;
+    document.getElementById('resultText').textContent = 
+      `❌ 未装下全部箱子 (${result.placed.length}/${result.total})，耗时${((endTime-startTime)/1000).toFixed(2)}s`;
     if (result.placed.length > 0) {
       clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
     }
