@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能装箱计算器 - 前后端版</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 15px; }
+        label { display: block; margin-top: 10px; font-weight: bold; }
+        input, select { width: 100%; padding: 8px; margin: 5px 0; box-sizing: border-box; }
+        .box-row { display: flex; gap: 10px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
+        .box-row input { width: 80px; }
+        button { padding: 10px 20px; margin: 15px 5px 15px 0; font-size: 16px; cursor: pointer; border-radius: 6px; border: none; }
+        #result { white-space: pre-wrap; background: #f5f5f5; padding: 15px; border-radius: 8px; line-height: 1.6; min-height: 100px; }
+        .btn-calc { background: #059669; color: white; }
+        .btn-calc:hover { background: #047857; }
+        .btn-ai { background: #4f46e5; color: white; }
+        .btn-ai:hover { background: #4338ca; }
+        .btn-add { background: #2563eb; color: white; }
+        .btn-add:hover { background: #1d4ed8; }
+        .loading { color: #d97706; font-weight: bold; }
+        .error { color: #dc2626; }
+    </style>
+</head>
+<body>
+    <h1>📦 智能装箱计算器（服务器版）</h1>
+    <p>输入卡车内部尺寸和纸箱清单，后端自动计算摆放方案，不再卡顿。</p>
+
+    <h2>卡车内部尺寸 (cm)</h2>
+    <label>长 <input type="number" id="truckL" value="589" min="1"></label>
+    <label>宽 <input type="number" id="truckW" value="235" min="1"></label>
+    <label>高 <input type="number" id="truckH" value="239" min="1"></label>
+
+    <h2>纸箱清单</h2>
+    <div id="boxList">
+        <div class="box-row">
+            <span>📦 1</span>
+            <input type="number" placeholder="长cm" class="boxL" value="40">
+            <input type="number" placeholder="宽cm" class="boxW" value="40">
+            <input type="number" placeholder="高cm" class="boxH" value="64">
+            <input type="number" placeholder="数量" class="boxQty" value="50" min="1">
+        </div>
+        <div class="box-row">
+            <span>📦 2</span>
+            <input type="number" placeholder="长cm" class="boxL" value="43">
+            <input type="number" placeholder="宽cm" class="boxW" value="43">
+            <input type="number" placeholder="高cm" class="boxH" value="72">
+            <input type="number" placeholder="数量" class="boxQty" value="50" min="1">
+        </div>
+        <div class="box-row">
+            <span>📦 3</span>
+            <input type="number" placeholder="长cm" class="boxL" value="40">
+            <input type="number" placeholder="宽cm" class="boxW" value="40">
+            <input type="number" placeholder="高cm" class="boxH" value="52">
+            <input type="number" placeholder="数量" class="boxQty" value="100" min="1">
+        </div>
+        <div class="box-row">
+            <span>📦 4</span>
+            <input type="number" placeholder="长cm" class="boxL" value="32">
+            <input type="number" placeholder="宽cm" class="boxW" value="32">
+            <input type="number" placeholder="高cm" class="boxH" value="51">
+            <input type="number" placeholder="数量" class="boxQty" value="100" min="1">
+        </div>
+    </div>
+    <button class="btn-add" onclick="addBoxRow()">➕ 添加纸箱类型</button>
+
+    <h2>摆放模式</h2>
+    <select id="mode">
+        <option value="grouped">🧱 优先同种纸箱相邻分布 (集中堆放)</option>
+        <option value="compact">🧩 优先最小空间占用 (允许混合放置)</option>
+    </select>
+
+    <button class="btn-calc" onclick="calculate()">⚡ 开始计算 (后端)</button>
+    <button class="btn-ai" onclick="askDeepSeek()">🤖 咨询 DeepSeek 更多问题</button>
+
+    <h2>📋 摆放说明</h2>
+    <div id="result">等待计算……</div>
+
+    <script>
+        // ========== 请替换为你自己的 Vercel 云函数地址 ==========
+        const API_URL = 'https://packing-api-chi.vercel.app/api/calculate';
+
+        let lastResultText = '';
+
+        function addBoxRow() {
+            const list = document.getElementById('boxList');
+            const idx = list.children.length + 1;
+            const div = document.createElement('div');
+            div.className = 'box-row';
+            div.innerHTML = `
+                <span>📦 ${idx}</span>
+                <input type="number" placeholder="长cm" class="boxL" value="40">
+                <input type="number" placeholder="宽cm" class="boxW" value="30">
+                <input type="number" placeholder="高cm" class="boxH" value="20">
+                <input type="number" placeholder="数量" class="boxQty" value="30" min="1">
+            `;
+            list.appendChild(div);
+        }
+
+        async function calculate() {
+            const truckL = +document.getElementById('truckL').value;
+            const truckW = +document.getElementById('truckW').value;
+            const truckH = +document.getElementById('truckH').value;
+            const mode = document.getElementById('mode').value;
+
+            const boxRows = document.querySelectorAll('#boxList .box-row');
+            const boxes = [];
+            boxRows.forEach((row, index) => {
+                const l = +row.querySelector('.boxL').value;
+                const w = +row.querySelector('.boxW').value;
+                const h = +row.querySelector('.boxH').value;
+                const qty = +row.querySelector('.boxQty').value;
+                if (l > 0 && w > 0 && h > 0 && qty > 0) {
+                    boxes.push({ id: index + 1, l, w, h, qty });
+                }
+            });
+
+            if (boxes.length === 0) {
+                document.getElementById('result').innerHTML = '<span class="error">❌ 请至少添加一种纸箱。</span>';
+                return;
+            }
+
+            // 显示加载状态
+            document.getElementById('result').innerHTML = '<span class="loading">⏳ 正在通过服务器计算，请稍候……（通常几秒内完成）</span>';
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        truck: { l: truckL, w: truckW, h: truckH },
+                        boxes: boxes,
+                        mode: mode
+                    })
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json().catch(() => ({}));
+                    throw new Error(errData.error || `服务器错误 (状态码 ${response.status})`);
+                }
+
+                const data = await response.json();
+                lastResultText = data.description;
+                document.getElementById('result').textContent = data.description;
+            } catch (error) {
+                document.getElementById('result').innerHTML = `<span class="error">❌ 计算失败：${error.message}</span>`;
+                console.error(error);
+            }
+        }
+
+        function askDeepSeek() {
+            if (!lastResultText || lastResultText.trim() === '') {
+                alert('请先计算装箱方案，再咨询 AI。');
+                return;
+            }
+            const question = `我使用了一个装箱计算器，得到了以下摆放结果。\n请帮我分析这个方案是否合理，有没有优化空间，以及如何进一步减少空隙。\n\n【计算结果】\n${lastResultText}`;
+            navigator.clipboard.writeText(question).then(() => {
+                alert('✅ 提问内容已复制！即将打开 DeepSeek，请在对话框中粘贴（Ctrl+V）并发送。');
+            }).catch(() => {
+                alert('复制失败，请手动复制页面上的计算结果。');
+            });
+            window.open('https://chat.deepseek.com/', '_blank');
+        }
+    </script>
+</body>
+</html>
