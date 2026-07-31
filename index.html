@@ -69,17 +69,17 @@
 
         // ---------- 简陋但可用的三维装箱算法 ----------
         function calculate() {
-            const truckL = +document.getElementById('truckL').value;
-            const truckW = +document.getElementById('truckW').value;
-            const truckH = +document.getElementById('truckH').value;
-            const mode = document.getElementById('mode').value;
+    const scale = 10; // 每格代表 10 cm，想更精细可改成 5
+    let truckL = Math.floor(+document.getElementById('truckL').value / scale);
+    let truckW = Math.floor(+document.getElementById('truckW').value / scale);
+    let truckH = Math.floor(+document.getElementById('truckH').value / scale);
 
             const boxes = [];
             const rows = document.querySelectorAll('#boxList .box-row');
             rows.forEach(row => {
-                const l = +row.querySelector('.boxL').value;
-                const w = +row.querySelector('.boxW').value;
-                const h = +row.querySelector('.boxH').value;
+                const l = Math.floor(+row.querySelector('.boxL').value / scale);
+const w = Math.floor(+row.querySelector('.boxW').value / scale);
+const h = Math.floor(+row.querySelector('.boxH').value / scale);
                 const qty = +row.querySelector('.boxQty').value;
                 if (l > 0 && w > 0 && h > 0 && qty > 0) {
                     boxes.push({ l, w, h, qty, id: boxes.length + 1 });
@@ -182,6 +182,16 @@
             }
 
             // 生成通俗描述
+            placements.push({
+    id: item.id,
+    l: cl * scale,   // 恢复为厘米显示
+    w: cw * scale,
+    h: ch * scale,
+    x: x * scale,
+    y: y * scale,
+    z: z * scale,
+    orient: `${cl * scale}×${cw * scale}×${ch * scale}`
+});
             let output = '';
             if (placements.length === 0) {
                 output = '❌ 无法放入任何纸箱，请检查尺寸。';
