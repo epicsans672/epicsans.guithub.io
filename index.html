@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 空间列表优化</title>
+  <title>货车装箱 - 高度图算法</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
@@ -37,8 +37,8 @@
     <div style="margin-top:15px;">
       <label>算法</label>
       <select id="mode">
-        <option value="fast" selected>快速模式 (5次随机)</option>
-        <option value="single">单次模式</option>
+        <option value="heightmap" selected>高度图算法 (推荐)</option>
+        <option value="heightmap-fast">单次模式</option>
       </select>
     </div>
     <button id="calcBtn">🚛 开始计算</button>
@@ -55,7 +55,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// =============== 方向 ===============
+// =============== 工具：方向 ===============
 function getAllowedOrientations(w,d,h, canTilt) {
   const ori = [[w,d,h]];
   if (w !== d) ori.push([d,w,h]);
@@ -66,146 +66,97 @@ function getAllowedOrientations(w,d,h, canTilt) {
   return ori;
 }
 
-// =============== 空间列表管理器（无重叠，带合并） ===============
-class SpaceManager {
+// =============== 高度图装箱器（确保支撑，从车头开始） ===============
+class HeightmapPacker {
   constructor(tw, td, th) {
-    // 初始空间：整个车厢，底面是地板
-    this.spaces = [{ x:0, y:0, z:0, w:tw, d:td, h:th, isFloor:true }];
+    this.tw = tw; this.td = td; this.th = th;
+    // 二维高度图，初始为0（地板）
+    this.height = Array(tw).fill().map(() => Array(td).fill(0));
+    // 保存已放置箱子用于渲染
+    this.placed = [];
   }
 
-  // 合并相邻且对齐的空间
-  mergeSpaces() {
-    let merged = true;
-    while (merged) {
-      merged = false;
-      for (let i = 0; i < this.spaces.length; i++) {
-        const a = this.spaces[i];
-        for (let j = i+1; j < this.spaces.length; j++) {
-          const b = this.spaces[j];
-          if (a.isFloor !== b.isFloor) continue;
-          // 上下合并 (y方向)
-          if (a.x===b.x && a.z===b.z && a.w===b.w && a.d===b.d) {
-            if (a.y+a.h === b.y) { a.h += b.h; this.spaces.splice(j,1); merged=true; break; }
-            if (b.y+b.h === a.y) { a.y = b.y; a.h += b.h; this.spaces.splice(j,1); merged=true; break; }
-          }
-          // 前后合并 (z方向)
-          if (a.x===b.x && a.y===b.y && a.w===b.w && a.h===b.h) {
-            if (a.z+a.d === b.z) { a.d += b.d; this.spaces.splice(j,1); merged=true; break; }
-            if (b.z+b.d === a.z) { a.z = b.z; a.d += b.d; this.spaces.splice(j,1); merged=true; break; }
-          }
-          // 左右合并 (x方向)
-          if (a.y===b.y && a.z===b.z && a.d===b.d && a.h===b.h) {
-            if (a.x+a.w === b.x) { a.w += b.w; this.spaces.splice(j,1); merged=true; break; }
-            if (b.x+b.w === a.x) { a.x = b.x; a.w += b.w; this.spaces.splice(j,1); merged=true; break; }
-          }
-        }
-        if (merged) break;
+  // 检查矩形区域 (x,z) 到 (x+ow-1, z+od-1) 是否平坦且高度相同
+  isFlat(x, z, ow, od) {
+    const baseH = this.height[x][z];
+    for (let dx = 0; dx < ow; dx++) {
+      for (let dz = 0; dz < od; dz++) {
+        if (this.height[x+dx][z+dz] !== baseH) return false;
       }
     }
+    return true;
   }
 
-  // 尝试放置一个箱子，返回评分最高的空间和方向
-  findBestPlacement(bw, bd, bh, canTilt) {
-    this.mergeSpaces();
-    let best = null, bestScore = -Infinity;
-    const orientations = getAllowedOrientations(bw, bd, bh, canTilt);
-    for (let i = 0; i < this.spaces.length; i++) {
-      const s = this.spaces[i];
-      // 支撑检查：底面必须是地板或已有箱子顶面（isFloor=true 表示底面是固体支撑）
-      if (!s.isFloor) continue;
-      for (let [ow, od, oh] of orientations) {
-        if (ow <= s.w && od <= s.d && oh <= s.h) {
-          // 评分：接触面积 + 剩余空间规整度
-          let contact = 0;
-          if (s.z === 0) contact += ow * oh;      // 贴车头
-          if (s.y === 0) contact += ow * od;      // 贴地板
-          if (s.x === 0) contact += od * oh;      // 贴左壁
-          if (s.y > 0) contact += ow * od;        // 下面有箱子支撑
-
-          // 模拟切割后的剩余空间最小维度
-          const remSpaces = [];
-          if (s.w - ow > 0) remSpaces.push({ w: s.w-ow, d: s.d, h: s.h });
-          if (s.d - od > 0) remSpaces.push({ w: ow, d: s.d-od, h: s.h });
-          if (s.h - oh > 0) remSpaces.push({ w: s.w, d: s.d, h: s.h-oh });
-          let minDim = remSpaces.length ? Math.min(...remSpaces.map(r => Math.min(r.w, r.d, r.h))) : 0;
-
-          const score = contact + (ow*od*oh)*0.001 + minDim * 0.5;
-          if (score > bestScore) {
-            bestScore = score;
-            best = { spaceIdx: i, ow, od, oh };
+  // 尝试放置一个箱子（带方向选择）
+  tryPlaceBox(w, d, h, canTilt) {
+    const oris = getAllowedOrientations(w, d, h, canTilt);
+    // 扫描顺序：z 从0开始（车头），x从0开始，这样自然从车头开始放
+    for (let z = 0; z < this.td; z++) {
+      for (let x = 0; x < this.tw; x++) {
+        const baseH = this.height[x][z];
+        // 如果当前位置高度+最小箱子高度已经超过车厢高，则无需继续（因为高度图只会增加）
+        // 这里暂时不优化，继续检查
+        for (let [ow, od, oh] of oris) {
+          if (x + ow > this.tw || z + od > this.td) continue;
+          if (baseH + oh > this.th) continue;
+          // 检查平坦
+          if (this.isFlat(x, z, ow, od)) {
+            // 找到放置位置
+            return { x, z, y: baseH, ow, od, oh };
           }
         }
       }
     }
-    return best;
+    return null;
   }
 
-  // 执行放置，切割空间
-  applyPlacement(spaceIdx, ow, od, oh) {
-    const s = this.spaces[spaceIdx];
-    const pos = { x: s.x, y: s.y, z: s.z };
-    const newSpaces = [];
-    // 右侧空间 (全深全高)
-    if (s.w - ow > 0) {
-      newSpaces.push({ x: s.x+ow, y: s.y, z: s.z, w: s.w-ow, d: s.d, h: s.h, isFloor: s.isFloor });
+  // 执行放置，更新高度图
+  placeBox(x, z, ow, od, oh) {
+    const y = this.height[x][z];
+    for (let dx = 0; dx < ow; dx++) {
+      for (let dz = 0; dz < od; dz++) {
+        this.height[x+dx][z+dz] = y + oh;
+      }
     }
-    // 上方空间 (全宽全深, 支撑为箱子顶面)
-    if (s.h - oh > 0) {
-      newSpaces.push({ x: s.x, y: s.y+oh, z: s.z, w: s.w, d: s.d, h: s.h-oh, isFloor: true }); // ★关键：上方空间底面是箱子，isFloor=true
-    }
-    // 前方空间 (宽度同箱子, 全高)
-    if (s.d - od > 0) {
-      newSpaces.push({ x: s.x, y: s.y, z: s.z+od, w: ow, d: s.d-od, h: s.h, isFloor: s.isFloor });
-    }
-    this.spaces.splice(spaceIdx, 1);
-    this.spaces.push(...newSpaces);
-    this.mergeSpaces();
-    return pos;
+    this.placed.push({ x, y, z, w: ow, d: od, h: oh });
+    return { x, y, z, w: ow, d: od, h: oh };
   }
 }
 
 // =============== 单次装箱 ===============
-function runGreedy(tw, td, th, items) {
-  const sm = new SpaceManager(tw, td, th);
-  const placed = [];
+function packItems(tw, td, th, items) {
+  const packer = new HeightmapPacker(tw, td, th);
   const steps = [];
   for (let item of items) {
-    const maxH = Math.max(...sm.spaces.map(s => s.y + s.h)); // 简单估计顶层
-    const canTilt = (maxH + Math.max(item.w, item.d, item.h) >= th);
-    const best = sm.findBestPlacement(item.w, item.d, item.h, canTilt);
-    if (!best) return { success: false, placed };
-    const pos = sm.applyPlacement(best.spaceIdx, best.ow, best.od, best.oh);
-    placed.push({ name: item.name, x: pos.x, y: pos.y, z: pos.z, w: best.ow, d: best.od, h: best.oh });
-    steps.push(`${item.name} 于 (${pos.x},${pos.y},${pos.z}) ${best.ow}×${best.od}×${best.oh}${best.oh!==item.h?'(侧放)':''}`);
+    // 判断是否为顶层：如果当前最高高度 + 箱子最小尺寸 >= 车厢高度，允许侧放
+    const maxH = Math.max(...packer.height.flat());
+    const canTilt = (maxH + Math.min(item.w, item.d, item.h) >= th);
+    const pos = packer.tryPlaceBox(item.w, item.d, item.h, canTilt);
+    if (!pos) return { success: false, placed: packer.placed, steps };
+    const box = packer.placeBox(pos.x, pos.z, pos.ow, pos.od, pos.oh);
+    steps.push(`${item.name} 放置于 (${box.x},${box.y},${box.z}) 尺寸 ${box.w}×${box.d}×${box.h}${box.h!==item.h?'(侧放)':''}`);
   }
-  return { success: true, placed, steps };
+  return { success: true, placed: packer.placed, steps };
 }
 
-// =============== 多次随机贪心 ===============
+// =============== 多次随机贪心（5次） ===============
 function packMultiple(tw, td, th, baseItems, trials = 5) {
-  const total = baseItems.length;
-  let bestPlaced = [];
-  let bestSteps = [];
-  let bestCount = 0;
-
+  let best = { success: false, placed: [], steps: [] };
   for (let t = 0; t < trials; t++) {
-    // 随机打乱（体积降序 + 轻微洗牌）
+    // 随机打乱顺序，但保持大箱子优先
     const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+    // 轻微洗牌
     for (let i = items.length - 1; i > 0; i--) {
       if (Math.random() < 0.5) {
         const j = Math.floor(Math.random() * (i + 1));
         [items[i], items[j]] = [items[j], items[i]];
       }
     }
-    const res = runGreedy(tw, td, th, items);
+    const res = packItems(tw, td, th, items);
     if (res.success) return res;
-    if (res.placed.length > bestCount) {
-      bestCount = res.placed.length;
-      bestPlaced = res.placed;
-      bestSteps = res.steps;
-    }
+    if (res.placed.length > best.placed.length) best = res;
   }
-  return { success: false, placed: bestPlaced, steps: bestSteps, total };
+  return best;
 }
 
 // =============== 3D 渲染 ===============
@@ -268,7 +219,7 @@ function getBoxes() {
   })).filter(b => b.w>0 && b.d>0 && b.h>0 && b.count>0);
 }
 
-// =============== 计算（带反馈）===============
+// =============== 计算（异步，带反馈） ===============
 async function calculate() {
   const tw = +document.getElementById('tw').value;
   const td = +document.getElementById('td').value;
@@ -289,22 +240,20 @@ async function calculate() {
     }
   }
 
-  // 异步运行
   setTimeout(() => {
     const startTime = performance.now();
     let result;
-    if (mode === 'fast') {
+    if (mode === 'heightmap') {
       result = packMultiple(tw, td, th, baseItems, 5);
     } else {
       const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
-      result = runGreedy(tw, td, th, items);
+      result = packItems(tw, td, th, items);
     }
-    const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+    const elapsed = ((performance.now() - startTime)/1000).toFixed(2);
 
     if (!result.success) {
-      const placedCount = result.placed ? result.placed.length : 0;
-      resultDiv.textContent = `❌ 未装下全部箱子 (${placedCount}/${baseItems.length})，耗时${elapsed}s`;
-      if (result.placed && result.placed.length > 0) {
+      resultDiv.textContent = `❌ 未装下全部箱子 (${result.placed.length}/${baseItems.length})，耗时${elapsed}s`;
+      if (result.placed.length > 0) {
         clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
       }
     } else {
