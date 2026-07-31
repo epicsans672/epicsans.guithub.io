@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车智能装箱计算器（竖直放置版）</title>
+  <title>货车智能装箱计算器（空间全覆盖版）</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; }
@@ -68,23 +68,22 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ---------- 工具：只允许水平旋转（宽深互换，高度不变）----------
 function getAllowedOrientations(w, d, h) {
-  // 宽和深可以互换，高度必须保持垂直
   const orientations = [];
-  orientations.push([w, d, h]); // 原始
+  orientations.push([w, d, h]);
   if (w !== d) {
-    orientations.push([d, w, h]); // 水平旋转90度
+    orientations.push([d, w, h]);
   }
   return orientations;
 }
 
-// ---------- 安全的剩余空间管理（车头优先）----------
+// ---------- 修正后的剩余空间管理（全覆盖切割，绝不浪费空间）----------
 class SpaceManager {
   constructor(tw, td, th) {
     this.spaces = [{ x:0, y:0, z:0, w:tw, d:td, h:th }];
   }
 
   tryPlace(bw, bd, bh) {
-    // 优先车头墙壁（z最小），然后越低越好（y最小），再靠左（x最小）
+    // 优先车头墙壁（z最小），其次越低越好（y最小），再靠左（x最小）
     this.spaces.sort((a,b) => a.z - b.z || a.y - b.y || a.x - b.x);
     for (let i = 0; i < this.spaces.length; i++) {
       const s = this.spaces[i];
@@ -92,17 +91,26 @@ class SpaceManager {
         const pos = { x: s.x, y: s.y, z: s.z };
         const newSpaces = [];
 
-        // 上方空间（箱子正上方）
-        if (s.h - bh > 0) {
-          newSpaces.push({ x: s.x, y: s.y + bh, z: s.z, w: bw, d: bd, h: s.h - bh });
-        }
-        // 右侧空间（箱子右边）
+        // 1. 右侧空间（x方向剩余，高度和深度覆盖原空间）
         if (s.w - bw > 0) {
-          newSpaces.push({ x: s.x + bw, y: s.y, z: s.z, w: s.w - bw, d: bd, h: bh });
+          newSpaces.push({
+            x: s.x + bw, y: s.y, z: s.z,
+            w: s.w - bw, d: s.d, h: s.h
+          });
         }
-        // 前方空间（向车尾方向）
+        // 2. 上方空间（y方向剩余，深度覆盖原空间，宽度只等于箱子宽度，因为右侧已被切走）
+        if (s.h - bh > 0) {
+          newSpaces.push({
+            x: s.x, y: s.y + bh, z: s.z,
+            w: bw, d: s.d, h: s.h - bh
+          });
+        }
+        // 3. 前方空间（z方向剩余，宽度和高度只等于箱子，因为上方和右侧已切走）
         if (s.d - bd > 0) {
-          newSpaces.push({ x: s.x, y: s.y, z: s.z + bd, w: bw, d: s.d - bd, h: bh });
+          newSpaces.push({
+            x: s.x, y: s.y, z: s.z + bd,
+            w: bw, d: s.d - bd, h: bh
+          });
         }
 
         this.spaces.splice(i, 1);
@@ -114,7 +122,7 @@ class SpaceManager {
   }
 }
 
-// ---------- 相邻分布算法（箱子高度不变）----------
+// ---------- 相邻分布算法 ----------
 function packAdjacent(tw, td, th, boxes) {
   const blocks = [];
   const steps = [];
@@ -174,7 +182,7 @@ function packAdjacent(tw, td, th, boxes) {
   return { success: true, placed, steps: [...steps, ...blockSteps] };
 }
 
-// ---------- 占空间最小算法（箱子高度不变）----------
+// ---------- 占空间最小算法 ----------
 function packSpaceMin(tw, td, th, boxes) {
   const sm = new SpaceManager(tw, td, th);
   const placed = [];
@@ -184,7 +192,6 @@ function packSpaceMin(tw, td, th, boxes) {
       items.push({ name: box.name, orientations: getAllowedOrientations(box.w, box.d, box.h) });
     }
   }
-  // 按体积降序排列
   items.sort((a, b) => {
     const vol = arr => arr[0] * arr[1] * arr[2];
     return vol(b.orientations[0]) - vol(a.orientations[0]);
@@ -257,7 +264,6 @@ function drawBoxes(placed) {
       colorIdx++;
     }
     const color = nameColorMap[item.name];
-    // 注意：Three.js 中 BoxGeometry 的参数顺序是 (宽, 高, 深)，对应 (x, y, z)
     const geo = new THREE.BoxGeometry(item.w, item.h, item.d);
     const mat = new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.75 });
     const cube = new THREE.Mesh(geo, mat);
