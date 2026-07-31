@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 安全空间列表</title>
+  <title>货车装箱 - 大箱顶放小箱</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
@@ -37,8 +37,8 @@
     <div style="margin-top:15px;">
       <label>算法</label>
       <select id="mode">
-        <option value="space" selected>安全空间列表 (推荐)</option>
-        <option value="space-fast">单次模式</option>
+        <option value="skyline" selected>分层天际线+顶放优化 (推荐)</option>
+        <option value="skyline-fast">单次模式</option>
       </select>
     </div>
     <button id="calcBtn">🚛 开始计算</button>
@@ -56,9 +56,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // =============== 方向 ===============
-function getAllowedOrientations(w, d, h, canTilt) {
-  const ori = [[w, d, h]];
-  if (w !== d) ori.push([d, w, h]);
+function getOrientations(w,d,h, canTilt) {
+  const ori = [[w,d,h]];
+  if (w !== d) ori.push([d,w,h]);
   if (canTilt) {
     const all = [[w,d,h],[d,w,h],[w,h,d],[h,w,d],[d,h,w],[h,d,w]];
     return Array.from(new Set(all.map(a=>a.join(',')))).map(s=>s.split(',').map(Number));
@@ -66,128 +66,191 @@ function getAllowedOrientations(w, d, h, canTilt) {
   return ori;
 }
 
-// =============== 安全空间列表管理器 ===============
-class SpaceManager {
-  constructor(tw, td, th) {
-    // 空间：{x,y,z,w,d,h, solid:true/false}  solid=true表示底面是实物（地板或箱子顶）
-    this.spaces = [{ x:0, y:0, z:0, w:tw, d:td, h:th, solid:true }];
-    this.th = th;
+// =============== 二维天际线 ===============
+class Skyline2D {
+  constructor(W, H) {
+    this.W = W; this.H = H;
+    this.lines = [{ x:0, y:0 }];
   }
 
-  // 获取当前所有空间的最高点（用于判断顶层）
-  getMaxHeight() {
-    let max = 0;
-    for (let s of this.spaces) {
-      const top = s.y + s.h;
-      if (top > max) max = top;
-    }
-    return max;
-  }
-
-  // 寻找放置位置
-  findPlacement(bw, bd, bh, canTilt) {
-    const oris = getAllowedOrientations(bw, bd, bh, canTilt);
-    // 优先车头（z小）、低处（y小）、左边（x小）
-    const sorted = [...this.spaces].sort((a,b) => a.z - b.z || a.y - b.y || a.x - b.x);
-    for (let s of sorted) {
-      if (!s.solid) continue; // 底面必须是实物
-      for (let [ow, od, oh] of oris) {
-        if (ow <= s.w && od <= s.d && oh <= s.h) {
-          return { spaceIdx: this.spaces.indexOf(s), ow, od, oh };
-        }
+  tryPlace(w, h) {
+    let bestX = -1, bestY = Infinity;
+    for (let i = 0; i < this.lines.length; i++) {
+      const line = this.lines[i];
+      let y = line.y, j = i, x = line.x, maxY = y, remainingW = w;
+      while (remainingW > 0 && j < this.lines.length) {
+        const nextLine = this.lines[j];
+        const widthAvail = (j < this.lines.length-1 ? this.lines[j+1].x - nextLine.x : this.W - nextLine.x);
+        const useW = Math.min(widthAvail, remainingW);
+        maxY = Math.max(maxY, nextLine.y);
+        remainingW -= useW;
+        if (remainingW > 0) j++;
+      }
+      if (remainingW === 0 && maxY + h <= this.H && y < bestY) {
+        bestY = y;
+        bestX = x;
       }
     }
-    return null;
+    if (bestX === -1) return null;
+    this._updateSkyline(bestX, w, bestY + h);
+    return { x: bestX, y: bestY };
   }
 
-  // 执行放置（经典三叉切割）
-  applyPlacement(spaceIdx, ow, od, oh) {
-    const s = this.spaces[spaceIdx];
-    const pos = { x: s.x, y: s.y, z: s.z };
-    const newSpaces = [];
+  _updateSkyline(x, w, newY) {
+    const newLines = [];
+    let i = 0;
+    while (i < this.lines.length && this.lines[i].x < x) {
+      newLines.push({...this.lines[i]}); i++;
+    }
+    newLines.push({ x, y: newY });
+    while (i < this.lines.length && this.lines[i].x < x + w) i++;
+    if (i < this.lines.length) {
+      const right = this.lines[i];
+      if (right.x > x + w) {
+        newLines.push({ x: x + w, y: this._getYAt(x + w) });
+      }
+      while (i < this.lines.length) {
+        newLines.push({...this.lines[i]}); i++;
+      }
+    } else if (x + w < this.W) {
+      newLines.push({ x: x + w, y: 0 });
+    }
+    // 合并相同高度的线段
+    this.lines = [];
+    for (let seg of newLines) {
+      if (this.lines.length > 0 && this.lines[this.lines.length-1].y === seg.y) {
+        // 合并
+      } else {
+        this.lines.push(seg);
+      }
+    }
+  }
 
-    // 右侧空间（全深全高，底面属性与s相同）
-    if (s.w - ow > 0) {
-      newSpaces.push({
-        x: s.x + ow, y: s.y, z: s.z,
-        w: s.w - ow, d: s.d, h: s.h,
-        solid: s.solid
-      });
+  _getYAt(x) {
+    for (let i = this.lines.length-1; i >= 0; i--) {
+      if (this.lines[i].x <= x) return this.lines[i].y;
     }
-    // 上方空间（全宽全深，底面是刚放的箱子 → solid=true）
-    if (s.h - oh > 0) {
-      newSpaces.push({
-        x: s.x, y: s.y + oh, z: s.z,
-        w: s.w, d: s.d, h: s.h - oh,
-        solid: true
-      });
-    }
-    // 前方空间（宽度同箱子，全高，底面属性同s）
-    if (s.d - od > 0) {
-      newSpaces.push({
-        x: s.x, y: s.y, z: s.z + od,
-        w: ow, d: s.d - od, h: s.h,
-        solid: s.solid
-      });
-    }
-
-    // 移除原空间，加入新空间
-    this.spaces.splice(spaceIdx, 1);
-    this.spaces.push(...newSpaces);
-    return pos;
+    return 0;
   }
 }
 
-// =============== 单次装箱 ===============
-function packOnce(tw, td, th, items) {
-  const sm = new SpaceManager(tw, td, th);
+// =============== 分层装箱 + 顶部放小箱 ===============
+function layerPack(tw, td, th, items) {
   const placed = [];
   const steps = [];
-  for (let item of items) {
-    // 如果当前最高点已经很接近车顶，允许侧放
-    const maxH = sm.getMaxHeight();
-    const canTilt = (maxH + Math.min(item.w, item.d, item.h) >= th);
-    const placement = sm.findPlacement(item.w, item.d, item.h, canTilt);
-    if (!placement) {
-      return { success: false, placed };
+  let z = 0;
+  let remaining = [...items].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+
+  // 第一阶段：分层天际线填充
+  while (remaining.length > 0 && z < td) {
+    // 寻找可用的层深
+    let layerDepth = null;
+    for (let item of remaining) {
+      const oris = getOrientations(item.w, item.d, item.h, false);
+      for (let [ow, od, oh] of oris) {
+        if (z + od <= td && oh <= th) {
+          layerDepth = od;
+          break;
+        }
+      }
+      if (layerDepth) break;
     }
-    const { spaceIdx, ow, od, oh } = placement;
-    const pos = sm.applyPlacement(spaceIdx, ow, od, oh);
-    placed.push({
-      name: item.name,
-      x: pos.x, y: pos.y, z: pos.z,
-      w: ow, d: od, h: oh
-    });
-    steps.push(`${item.name} 放置于 (${pos.x},${pos.y},${pos.z}) 尺寸 ${ow}×${od}×${oh}${oh!==item.h?'(侧放)':''}`);
+    if (!layerDepth) {
+      layerDepth = Math.min(td - z, ...remaining.map(i => Math.min(i.w, i.d)));
+      if (layerDepth <= 0) break;
+    }
+
+    // 收集深度匹配的箱子
+    const candidates = [];
+    for (let i = remaining.length-1; i >= 0; i--) {
+      const item = remaining[i];
+      const oris = getOrientations(item.w, item.d, item.h, false);
+      for (let [ow, od, oh] of oris) {
+        if (od === layerDepth && oh <= th) {
+          candidates.push({ item, ow, od, oh });
+          remaining.splice(i, 1);
+          break;
+        }
+      }
+    }
+
+    if (candidates.length === 0) {
+      z += layerDepth;
+      continue;
+    }
+
+    const sky2d = new Skyline2D(tw, th);
+    for (let cand of candidates) {
+      const pos = sky2d.tryPlace(cand.ow, cand.oh);
+      if (pos) {
+        placed.push({
+          name: cand.item.name,
+          x: pos.x, y: pos.y, z: z,
+          w: cand.ow, d: cand.od, h: cand.oh
+        });
+        steps.push(`${cand.item.name} 于 (${pos.x},${pos.y},${z}) ${cand.ow}×${cand.od}×${cand.oh}`);
+      } else {
+        remaining.push(cand.item); // 放回
+      }
+    }
+    z += layerDepth;
   }
-  return { success: true, placed, steps };
+
+  // 第二阶段：尝试在已放置箱子顶部放剩余小箱
+  if (remaining.length > 0) {
+    for (let i = remaining.length-1; i >= 0; i--) {
+      const item = remaining[i];
+      let placedFlag = false;
+      // 寻找能托住该箱子的顶部区域
+      for (let p of placed) {
+        const topY = p.y + p.h;
+        if (topY >= th) continue;
+        // 检查顶面尺寸是否足够
+        const oris = getOrientations(item.w, item.d, item.h, true); // 允许侧放
+        for (let [ow, od, oh] of oris) {
+          if (ow <= p.w && od <= p.d && topY + oh <= th) {
+            // 检查该区域是否空置（简单起见，先假设顶部平坦且未被占用）
+            // 因为当前算法不会在同一层顶部放置重叠，所以我们直接放
+            placed.push({
+              name: item.name,
+              x: p.x, y: topY, z: p.z,
+              w: ow, d: od, h: oh
+            });
+            steps.push(`${item.name} 放在 (${p.x},${p.y+p.h},${p.z}) 顶部 ${ow}×${od}×${oh}`);
+            remaining.splice(i, 1);
+            placedFlag = true;
+            break;
+          }
+        }
+        if (placedFlag) break;
+      }
+    }
+  }
+
+  return {
+    success: remaining.length === 0,
+    placed,
+    steps,
+    remainingCount: remaining.length
+  };
 }
 
 // =============== 多次随机贪心 ===============
 function packMultiple(tw, td, th, baseItems, trials = 5) {
-  const total = baseItems.length;
-  let bestPlaced = [];
-  let bestSteps = [];
-  let bestCount = 0;
-
+  let best = { success: false, placed: [], steps: [], remainingCount: baseItems.length };
   for (let t = 0; t < trials; t++) {
-    // 随机打乱顺序（体积大先放）
-    const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
-    for (let i = items.length - 1; i > 0; i--) {
+    const shuffled = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+    for (let i = shuffled.length-1; i > 0; i--) {
       if (Math.random() < 0.5) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [items[i], items[j]] = [items[j], items[i]];
+        const j = Math.floor(Math.random() * (i+1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
       }
     }
-    const res = packOnce(tw, td, th, items);
+    const res = layerPack(tw, td, th, shuffled);
     if (res.success) return res;
-    if (res.placed.length > bestCount) {
-      bestCount = res.placed.length;
-      bestPlaced = res.placed;
-      bestSteps = res.steps;
-    }
+    if (res.placed.length > best.placed.length) best = res;
   }
-  return { success: false, placed: bestPlaced, steps: bestSteps, total };
+  return best;
 }
 
 // =============== 3D 渲染 ===============
@@ -250,7 +313,7 @@ function getBoxes() {
   })).filter(b => b.w>0 && b.d>0 && b.h>0 && b.count>0);
 }
 
-// =============== 计算（带反馈） ===============
+// =============== 计算 ===============
 async function calculate() {
   const tw = +document.getElementById('tw').value;
   const td = +document.getElementById('td').value;
@@ -274,16 +337,17 @@ async function calculate() {
   setTimeout(() => {
     const startTime = performance.now();
     let result;
-    if (mode === 'space') {
+    if (mode === 'skyline') {
       result = packMultiple(tw, td, th, baseItems, 5);
     } else {
       const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
-      result = packOnce(tw, td, th, items);
+      result = layerPack(tw, td, th, items);
     }
     const elapsed = ((performance.now() - startTime)/1000).toFixed(2);
 
     if (!result.success) {
-      resultDiv.textContent = `❌ 未装下全部箱子 (${result.placed.length}/${baseItems.length})，耗时${elapsed}s`;
+      resultDiv.textContent = `❌ 未装下全部箱子 (${result.placed.length}/${baseItems.length})，耗时${elapsed}s\n` +
+        (result.remainingCount ? `剩余 ${result.remainingCount} 箱未能放入` : '');
       if (result.placed.length > 0) {
         clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
       }
