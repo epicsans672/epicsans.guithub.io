@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 快速高度图</title>
+  <title>货车装箱 - 反馈修复版</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
@@ -14,7 +14,8 @@
     input, button, select { width:100%; padding:8px; border:none; border-radius:6px; margin-bottom:8px; }
     input, select { background:#0f3460; color:#fff; }
     button { background:#e94560; color:white; font-weight:bold; cursor:pointer; }
-    button:hover { background:#ff6b81; }
+    button:disabled { background:#555; cursor:not-allowed; }
+    button:hover:not(:disabled) { background:#ff6b81; }
     .box-row { display:flex; gap:5px; align-items:center; flex-wrap:wrap; }
     .box-row input { width:65px; }
     .box-row button { width:auto; padding:6px 10px; font-size:12px; }
@@ -71,16 +72,12 @@ class HeightmapPacker {
   constructor(tw, td, th) {
     this.tw = tw; this.td = td; this.th = th;
     this.height = Array(tw).fill().map(() => Array(td).fill(0));
-    // 平坦区域缓存：每个高度记录一个二维网格是否平坦（这里简化，不缓存，但用增量更新思路）
-    // 为了提高速度，我们使用角落列表：存储所有可能的放置角落（矩形区域的左下角）
-    // 初始角落是整个车厢底面 (0,0)
-    this.corners = new Map(); // key: 'x,z', value: {x,z,h}
+    this.corners = new Map();
     this.addCorner(0, 0, 0);
   }
 
   addCorner(x, z, h) {
     const key = `${x},${z}`;
-    // 只保留最低的角落（同一位置可能有多个高度，取最小的那个）
     if (!this.corners.has(key) || this.corners.get(key).h > h) {
       this.corners.set(key, {x, z, h});
     }
@@ -90,50 +87,37 @@ class HeightmapPacker {
     this.corners.delete(`${x},${z}`);
   }
 
-  // 重新计算某个区域影响的角落（放置箱子后）
   updateCornersAfterPlacement(px, pz, pw, pd, newHeight) {
-    // 移除被箱子覆盖区域的角落
     for (let dx = 0; dx < pw; dx++) {
       for (let dz = 0; dz < pd; dz++) {
         this.removeCorner(px + dx, pz + dz);
       }
     }
-    // 在箱子边缘外侧新增角落（右侧和前方）
-    // 右侧 x = px + pw
     if (px + pw < this.tw) {
       for (let dz = 0; dz < pd; dz++) {
         let z = pz + dz;
-        // 高度取该列相邻格子的高度（因为右侧可能高度不同）
-        let h = this.height[px + pw][z];
-        this.addCorner(px + pw, z, h);
+        this.addCorner(px + pw, z, this.height[px + pw][z]);
       }
     }
-    // 前方 z = pz + pd
     if (pz + pd < this.td) {
       for (let dx = 0; dx < pw; dx++) {
         let x = px + dx;
-        let h = this.height[x][pz + pd];
-        this.addCorner(x, pz + pd, h);
+        this.addCorner(x, pz + pd, this.height[x][pz + pd]);
       }
     }
-    // 外侧角点 (px+pw, pz+pd)
     if (px + pw < this.tw && pz + pd < this.td) {
       this.addCorner(px + pw, pz + pd, this.height[px+pw][pz+pd]);
     }
   }
 
-  // 寻找可放置的位置
   findPlacement(bw, bd, bh, canTilt) {
     const oris = getOrientations(bw, bd, bh, canTilt);
-    let best = null;
-    // 遍历所有角落，按高度优先、z优先、x优先
     const sortedCorners = Array.from(this.corners.values()).sort(
       (a,b) => a.h - b.h || a.z - b.z || a.x - b.x
     );
     for (let corner of sortedCorners) {
       const {x, z, h} = corner;
       if (x + bw > this.tw || z + bd > this.td) continue;
-      // 检查底面平坦（所有格子高度等于h）
       let flat = true;
       for (let dx = 0; dx < bw && flat; dx++) {
         for (let dz = 0; dz < bd && flat; dz++) {
@@ -141,27 +125,22 @@ class HeightmapPacker {
         }
       }
       if (!flat) continue;
-      // 尝试每种方向
       for (let [ow, od, oh] of oris) {
-        if (ow > bw || od > bd) continue; // 矩形已限定为bw*bd，这里ow,od必须匹配
+        if (ow > bw || od > bd) continue;
         if (h + oh > this.th) continue;
-        // 找到合法放置
         return { x, z, y: h, ow, od, oh };
       }
     }
     return null;
   }
 
-  // 放置箱子并更新
   placeBox(x, z, ow, od, oh) {
     const y = this.height[x][z];
-    // 更新高度图
     for (let dx = 0; dx < ow; dx++) {
       for (let dz = 0; dz < od; dz++) {
         this.height[x+dx][z+dz] = y + oh;
       }
     }
-    // 更新角落
     this.updateCornersAfterPlacement(x, z, ow, od, y + oh);
     return { x, y, z, w: ow, d: od, h: oh };
   }
@@ -175,9 +154,7 @@ function packWithHeightmap(tw, td, th, baseItems, maxTrials = 50) {
   let bestCount = 0;
 
   for (let trial = 0; trial < maxTrials; trial++) {
-    // 随机打乱顺序，但保持大致体积降序（大箱子先放）
     const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
-    // 轻微洗牌
     for (let i = items.length - 1; i > 0; i--) {
       if (Math.random() < 0.4) {
         const j = Math.floor(Math.random() * (i + 1));
@@ -191,7 +168,6 @@ function packWithHeightmap(tw, td, th, baseItems, maxTrials = 50) {
     let success = true;
 
     for (let item of items) {
-      // 判断是否接近顶层（允许侧放）
       const maxH = Math.max(...packer.height.flat());
       const canTilt = (maxH + Math.max(item.w, item.d, item.h) >= th);
       const placement = packer.findPlacement(item.w, item.d, item.h, canTilt);
@@ -290,6 +266,7 @@ function getBoxes() {
   })).filter(b => b.w>0 && b.d>0 && b.h>0 && b.count>0);
 }
 
+// =============== 计算核心（带加载反馈）===============
 async function calculate() {
   const tw = +document.getElementById('tw').value;
   const td = +document.getElementById('td').value;
@@ -297,6 +274,12 @@ async function calculate() {
   const boxes = getBoxes();
   if (!tw||!td||!th||!boxes.length) return alert('请填完整');
   const mode = document.getElementById('mode').value;
+
+  const calcBtn = document.getElementById('calcBtn');
+  const resultDiv = document.getElementById('resultText');
+  calcBtn.disabled = true;
+  calcBtn.textContent = '⏳ 计算中...';
+  resultDiv.textContent = '正在计算，请稍候...';
 
   // 展开所有箱子
   const baseItems = [];
@@ -306,37 +289,46 @@ async function calculate() {
     }
   }
 
-  const startTime = performance.now();
-  let result;
-  if (mode === 'heightmap') {
-    result = packWithHeightmap(tw, td, th, baseItems, 50);
-  } else {
-    result = packWithHeightmap(tw, td, th, baseItems, 1);
-  }
-  const endTime = performance.now();
-
-  if (!result.success) {
-    document.getElementById('resultText').textContent = 
-      `❌ 未装下全部箱子 (${result.placed.length}/${result.total})，耗时${((endTime-startTime)/1000).toFixed(2)}s`;
-    if (result.placed.length > 0) {
-      clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
+  // 使用setTimeout让UI更新，避免界面冻结
+  setTimeout(() => {
+    const startTime = performance.now();
+    let result;
+    if (mode === 'heightmap') {
+      result = packWithHeightmap(tw, td, th, baseItems, 50);
+    } else {
+      result = packWithHeightmap(tw, td, th, baseItems, 1);
     }
-    return;
-  }
+    const endTime = performance.now();
 
-  const verify = verifySlices(result.placed, tw, th, 10);
-  if (!verify.valid) {
-    document.getElementById('resultText').textContent = `❌ 截面验证失败：z=${verify.z} 面积${verify.totalArea} > ${verify.maxArea}`;
-    return;
-  }
+    if (!result.success) {
+      resultDiv.textContent = 
+        `❌ 未装下全部箱子 (${result.placed.length}/${result.total})，耗时${((endTime-startTime)/1000).toFixed(2)}s`;
+      if (result.placed.length > 0) {
+        clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
+      }
+      calcBtn.disabled = false;
+      calcBtn.textContent = '🚛 开始计算';
+      return;
+    }
 
-  const fillRate = (result.placed.reduce((s,p)=>s+p.w*p.d*p.h,0) / (tw*td*th) * 100).toFixed(1);
-  document.getElementById('resultText').textContent = 
-    `✅ 全部装入 (${result.placed.length}箱) 耗时${((endTime-startTime)/1000).toFixed(2)}s\n` +
-    `填充率: ${fillRate}%  截面验证: 通过\n` +
-    result.steps.join('\n');
+    const verify = verifySlices(result.placed, tw, th, 10);
+    if (!verify.valid) {
+      resultDiv.textContent = `❌ 截面验证失败：z=${verify.z} 面积${verify.totalArea} > ${verify.maxArea}`;
+      calcBtn.disabled = false;
+      calcBtn.textContent = '🚛 开始计算';
+      return;
+    }
 
-  clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
+    const fillRate = (result.placed.reduce((s,p)=>s+p.w*p.d*p.h,0) / (tw*td*th) * 100).toFixed(1);
+    resultDiv.textContent = 
+      `✅ 全部装入 (${result.placed.length}箱) 耗时${((endTime-startTime)/1000).toFixed(2)}s\n` +
+      `填充率: ${fillRate}%  截面验证: 通过\n` +
+      result.steps.join('\n');
+
+    clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
+    calcBtn.disabled = false;
+    calcBtn.textContent = '🚛 开始计算';
+  }, 50);
 }
 
 // 默认数据
