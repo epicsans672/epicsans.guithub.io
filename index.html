@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 高度图算法</title>
+  <title>货车装箱 - 分层天际线算法</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
@@ -37,8 +37,8 @@
     <div style="margin-top:15px;">
       <label>算法</label>
       <select id="mode">
-        <option value="heightmap" selected>高度图算法 (推荐)</option>
-        <option value="heightmap-fast">单次模式</option>
+        <option value="skyline" selected>分层天际线 (推荐)</option>
+        <option value="skyline-fast">单次模式</option>
       </select>
     </div>
     <button id="calcBtn">🚛 开始计算</button>
@@ -55,9 +55,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// =============== 工具：方向 ===============
-function getAllowedOrientations(w,d,h, canTilt) {
-  const ori = [[w,d,h]];
+// =============== 方向 ===============
+function getOrientations(w,d,h, canTilt) {
+  const ori = [[w,d,h]]; // 宽,深,高
   if (w !== d) ori.push([d,w,h]);
   if (canTilt) {
     const all = [[w,d,h],[d,w,h],[w,h,d],[h,w,d],[d,h,w],[h,d,w]];
@@ -66,93 +66,222 @@ function getAllowedOrientations(w,d,h, canTilt) {
   return ori;
 }
 
-// =============== 高度图装箱器（确保支撑，从车头开始） ===============
-class HeightmapPacker {
-  constructor(tw, td, th) {
-    this.tw = tw; this.td = td; this.th = th;
-    // 二维高度图，初始为0（地板）
-    this.height = Array(tw).fill().map(() => Array(td).fill(0));
-    // 保存已放置箱子用于渲染
-    this.placed = [];
+// =============== 二维天际线装箱 (宽度W, 高度H) ===============
+class Skyline2D {
+  constructor(W, H) {
+    this.W = W; this.H = H;
+    // 天际线：线段列表，每个线段 [x_start, height]，按x排序
+    this.lines = [{ x:0, y:0 }];
   }
 
-  // 检查矩形区域 (x,z) 到 (x+ow-1, z+od-1) 是否平坦且高度相同
-  isFlat(x, z, ow, od) {
-    const baseH = this.height[x][z];
-    for (let dx = 0; dx < ow; dx++) {
-      for (let dz = 0; dz < od; dz++) {
-        if (this.height[x+dx][z+dz] !== baseH) return false;
+  // 尝试放置一个宽w高h的矩形，返回放置的 (x, y) 或 null
+  tryPlace(w, h) {
+    let bestX = -1, bestY = Infinity;
+    // 遍历天际线，寻找最低水平线段可以容纳这个矩形
+    for (let i = 0; i < this.lines.length; i++) {
+      const line = this.lines[i];
+      let y = line.y;
+      // 检查从 line.x 开始能否放得下宽度 w
+      let j = i;
+      let x = line.x;
+      let maxY = y;
+      let remainingW = w;
+      while (remainingW > 0 && j < this.lines.length) {
+        const nextLine = this.lines[j];
+        const widthAvail = (j < this.lines.length - 1 ? this.lines[j+1].x - nextLine.x : this.W - nextLine.x);
+        const useW = Math.min(widthAvail, remainingW);
+        maxY = Math.max(maxY, nextLine.y);
+        remainingW -= useW;
+        if (remainingW > 0) j++;
+      }
+      if (remainingW === 0 && maxY + h <= this.H) {
+        // 可以选择最低的 y 来放置
+        if (y < bestY) {
+          bestY = y;
+          bestX = x;
+        }
       }
     }
-    return true;
+    if (bestX === -1) return null;
+
+    // 更新天际线
+    this._updateSkyline(bestX, w, bestY + h);
+    return { x: bestX, y: bestY };
   }
 
-  // 尝试放置一个箱子（带方向选择）
-  tryPlaceBox(w, d, h, canTilt) {
-    const oris = getAllowedOrientations(w, d, h, canTilt);
-    // 扫描顺序：z 从0开始（车头），x从0开始，这样自然从车头开始放
-    for (let z = 0; z < this.td; z++) {
-      for (let x = 0; x < this.tw; x++) {
-        const baseH = this.height[x][z];
-        // 如果当前位置高度+最小箱子高度已经超过车厢高，则无需继续（因为高度图只会增加）
-        // 这里暂时不优化，继续检查
-        for (let [ow, od, oh] of oris) {
-          if (x + ow > this.tw || z + od > this.td) continue;
-          if (baseH + oh > this.th) continue;
-          // 检查平坦
-          if (this.isFlat(x, z, ow, od)) {
-            // 找到放置位置
-            return { x, z, y: baseH, ow, od, oh };
+  _updateSkyline(x, w, newY) {
+    const newLines = [];
+    let i = 0;
+    // 添加左侧不变的线段
+    while (i < this.lines.length && this.lines[i].x < x) {
+      newLines.push({...this.lines[i]});
+      i++;
+    }
+    // 添加新放置后的线段
+    newLines.push({ x, y: newY });
+    // 跳过被覆盖的线段
+    while (i < this.lines.length && this.lines[i].x < x + w) {
+      i++;
+    }
+    // 如果右侧还有线段，调整其起点
+    if (i < this.lines.length) {
+      const right = this.lines[i];
+      if (right.x > x + w) {
+        newLines.push({ x: x + w, y: this._getYAt(x + w) });
+      }
+      // 添加剩余的线段
+      while (i < this.lines.length) {
+        newLines.push({...this.lines[i]});
+        i++;
+      }
+    } else if (x + w < this.W) {
+      newLines.push({ x: x + w, y: 0 });
+    }
+    // 合并同高度的相邻线段
+    this.lines = [];
+    for (let seg of newLines) {
+      if (this.lines.length > 0 && this.lines[this.lines.length-1].y === seg.y) {
+        // 合并，只需更新x（实际x已连续）
+      } else {
+        this.lines.push(seg);
+      }
+    }
+  }
+
+  _getYAt(x) {
+    for (let i = this.lines.length-1; i >= 0; i--) {
+      if (this.lines[i].x <= x) return this.lines[i].y;
+    }
+    return 0;
+  }
+}
+
+// =============== 分层装箱器 ===============
+function layerPack(tw, td, th, items, canTiltTop = true) {
+  const placed = [];
+  const steps = [];
+  let z = 0; // 当前层的起始z坐标
+  // 按体积降序排序，大箱子优先
+  const sorted = [...items].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+  let remaining = [...sorted];
+
+  while (remaining.length > 0 && z < td) {
+    // 寻找一个可以放入当前层的箱子来定义层深
+    let layerDepth = null;
+    let layerItems = [];
+    // 贪心：先尝试用最大的箱子定义层，如果放不下则尝试较小的
+    for (let i = 0; i < remaining.length; i++) {
+      const item = remaining[i];
+      // 允许的方向（非顶层竖立，顶层可能侧放）
+      const maxH = th; // 此处不再限制，由天际线自己判断
+      const canTilt = (z === 0 ? false : canTiltTop); // 只有顶层允许侧放，这里简化
+      const oris = getOrientations(item.w, item.d, item.h, canTilt && z > 0);
+      for (let [ow, od, oh] of oris) {
+        if (z + od <= td && oh <= th) {
+          // 使用这个方向作为层深
+          layerDepth = od;
+          break;
+        }
+      }
+      if (layerDepth) break;
+    }
+    if (!layerDepth) {
+      // 没有任何箱子能放进剩余深度，用最小剩余箱子深度
+      layerDepth = td - z;
+      if (layerDepth <= 0) break;
+    }
+
+    // 收集所有可以放进该层深的箱子（方向必须匹配深度，即od == layerDepth）
+    const candidates = [];
+    for (let i = remaining.length-1; i >= 0; i--) {
+      const item = remaining[i];
+      const oris = getOrientations(item.w, item.d, item.h, false);
+      let found = false;
+      for (let [ow, od, oh] of oris) {
+        if (od === layerDepth && oh <= th) {
+          candidates.push({ item, ow, od, oh, idx: i });
+          found = true;
+          break;
+        }
+      }
+      if (found) {
+        remaining.splice(i, 1);
+      }
+    }
+
+    // 如果该深度没有箱子，尝试用其他深度
+    if (candidates.length === 0) {
+      // 用最小的箱子深度强行推进
+      let minDepth = td - z;
+      for (let item of remaining) {
+        minDepth = Math.min(minDepth, item.d, item.w);
+      }
+      z += Math.max(1, minDepth);
+      continue;
+    }
+
+    // 二维天际线填充该层 (宽度 tw, 高度 th)
+    const sky2d = new Skyline2D(tw, th);
+    for (let cand of candidates) {
+      const { ow, od, oh, item } = cand;
+      const pos = sky2d.tryPlace(ow, oh);
+      if (pos) {
+        placed.push({
+          name: item.name,
+          x: pos.x, y: pos.y, z: z,
+          w: ow, d: od, h: oh
+        });
+        steps.push(`${item.name} 放置于 (${pos.x},${pos.y},${z}) 尺寸 ${ow}×${od}×${oh}`);
+      } else {
+        // 放不下，放回剩余列表
+        remaining.push(item);
+      }
+    }
+
+    z += layerDepth;
+  }
+
+  // 剩余未处理的箱子再尝试一次（允许侧放，填满顶部）
+  if (remaining.length > 0 && z < td) {
+    // 剩余空间再用天际线尝试，允许侧放
+    const sky2d = new Skyline2D(tw, th);
+    for (let item of remaining) {
+      const oris = getOrientations(item.w, item.d, item.h, true);
+      let placedFlag = false;
+      for (let [ow, od, oh] of oris) {
+        if (z + od <= td && oh <= th) {
+          const pos = sky2d.tryPlace(ow, oh);
+          if (pos) {
+            placed.push({
+              name: item.name,
+              x: pos.x, y: pos.y, z: z,
+              w: ow, d: od, h: oh
+            });
+            steps.push(`${item.name} 放置于 (${pos.x},${pos.y},${z}) 尺寸 ${ow}×${od}×${oh} (侧放)`);
+            placedFlag = true;
+            break;
           }
         }
       }
     }
-    return null;
   }
 
-  // 执行放置，更新高度图
-  placeBox(x, z, ow, od, oh) {
-    const y = this.height[x][z];
-    for (let dx = 0; dx < ow; dx++) {
-      for (let dz = 0; dz < od; dz++) {
-        this.height[x+dx][z+dz] = y + oh;
-      }
-    }
-    this.placed.push({ x, y, z, w: ow, d: od, h: oh });
-    return { x, y, z, w: ow, d: od, h: oh };
-  }
+  return { success: placed.length === items.length, placed, steps };
 }
 
-// =============== 单次装箱 ===============
-function packItems(tw, td, th, items) {
-  const packer = new HeightmapPacker(tw, td, th);
-  const steps = [];
-  for (let item of items) {
-    // 判断是否为顶层：如果当前最高高度 + 箱子最小尺寸 >= 车厢高度，允许侧放
-    const maxH = Math.max(...packer.height.flat());
-    const canTilt = (maxH + Math.min(item.w, item.d, item.h) >= th);
-    const pos = packer.tryPlaceBox(item.w, item.d, item.h, canTilt);
-    if (!pos) return { success: false, placed: packer.placed, steps };
-    const box = packer.placeBox(pos.x, pos.z, pos.ow, pos.od, pos.oh);
-    steps.push(`${item.name} 放置于 (${box.x},${box.y},${box.z}) 尺寸 ${box.w}×${box.d}×${box.h}${box.h!==item.h?'(侧放)':''}`);
-  }
-  return { success: true, placed: packer.placed, steps };
-}
-
-// =============== 多次随机贪心（5次） ===============
+// =============== 多次随机打乱（提高成功率） ===============
 function packMultiple(tw, td, th, baseItems, trials = 5) {
-  let best = { success: false, placed: [], steps: [] };
+  let best = { success: false, placed: [] };
   for (let t = 0; t < trials; t++) {
-    // 随机打乱顺序，但保持大箱子优先
-    const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
-    // 轻微洗牌
-    for (let i = items.length - 1; i > 0; i--) {
+    // 随机打乱
+    const shuffled = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+    for (let i = shuffled.length-1; i>0; i--) {
       if (Math.random() < 0.5) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [items[i], items[j]] = [items[j], items[i]];
+        const j = Math.floor(Math.random() * (i+1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
       }
     }
-    const res = packItems(tw, td, th, items);
+    const res = layerPack(tw, td, th, shuffled);
     if (res.success) return res;
     if (res.placed.length > best.placed.length) best = res;
   }
@@ -219,7 +348,7 @@ function getBoxes() {
   })).filter(b => b.w>0 && b.d>0 && b.h>0 && b.count>0);
 }
 
-// =============== 计算（异步，带反馈） ===============
+// =============== 计算（异步） ===============
 async function calculate() {
   const tw = +document.getElementById('tw').value;
   const td = +document.getElementById('td').value;
@@ -243,11 +372,11 @@ async function calculate() {
   setTimeout(() => {
     const startTime = performance.now();
     let result;
-    if (mode === 'heightmap') {
+    if (mode === 'skyline') {
       result = packMultiple(tw, td, th, baseItems, 5);
     } else {
       const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
-      result = packItems(tw, td, th, items);
+      result = layerPack(tw, td, th, items);
     }
     const elapsed = ((performance.now() - startTime)/1000).toFixed(2);
 
