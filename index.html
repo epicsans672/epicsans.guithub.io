@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 最终版</title>
+  <title>货车装箱 - LMH算法</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
@@ -37,9 +37,10 @@
     <div style="margin-top:15px;">
       <label>模式</label>
       <select id="mode">
-        <option value="auto" selected>优先相邻分布</option>
+        <option value="auto">优先相邻分布</option>
         <option value="adjacent">仅相邻分布</option>
-        <option value="space">仅占空间最小</option>
+        <option value="space">占空间最小</option>
+        <option value="lmh" selected>LMH 算法</option>
       </select>
     </div>
     <button id="calcBtn">🚛 开始计算</button>
@@ -56,29 +57,21 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ==================== 工具函数 ====================
+// ==================== 工具 ====================
 function getAllowedOrientations(w,d,h, isTopLayer) {
-  // 默认只水平旋转（高不变）
   const ori = [[w,d,h]];
   if (w !== d) ori.push([d,w,h]);
-  // 如果是最顶层，允许任意方向（6种）
   if (isTopLayer) {
-    const all = [
-      [w,d,h],[d,w,h], // 竖立
-      [w,h,d],[h,w,d], // 侧放1
-      [d,h,w],[h,d,w]  // 侧放2
-    ];
-    // 去重
-    const uniq = Array.from(new Set(all.map(a=>a.join(',')))).map(s=>s.split(',').map(Number));
-    return uniq;
+    const all = [[w,d,h],[d,w,h],[w,h,d],[h,w,d],[d,h,w],[h,d,w]];
+    return Array.from(new Set(all.map(a=>a.join(',')))).map(s=>s.split(',').map(Number));
   }
   return ori;
 }
 
-// ==================== 空间管理器（带支撑、顶层检测） ====================
+// ==================== 空间管理器 ====================
 class SpaceManager {
   constructor(tw, td, th) {
-    this.spaces = [{ x:0, y:0, z:0, w:tw, d:td, h:th, isFloor:true }]; // isFloor: 底面是车厢地板
+    this.spaces = [{ x:0, y:0, z:0, w:tw, d:td, h:th, isFloor:true }];
     this.th = th;
   }
 
@@ -90,21 +83,18 @@ class SpaceManager {
         const a = this.spaces[i];
         for (let j = i+1; j < this.spaces.length; j++) {
           const b = this.spaces[j];
-          // 上下合并 (要求同高，且两个空间底面同属性？为简化，只合并同isFloor)
           if (a.x===b.x && a.z===b.z && a.w===b.w && a.d===b.d && a.y+a.h===b.y && a.isFloor===b.isFloor) {
             a.h += b.h; this.spaces.splice(j,1); merged=true; break;
           }
           if (a.x===b.x && a.z===b.z && a.w===b.w && a.d===b.d && b.y+b.h===a.y && a.isFloor===b.isFloor) {
             a.y = b.y; a.h += b.h; this.spaces.splice(j,1); merged=true; break;
           }
-          // 前后合并 (z方向)
           if (a.x===b.x && a.y===b.y && a.w===b.w && a.h===b.h && a.z+a.d===b.z && a.isFloor===b.isFloor) {
             a.d += b.d; this.spaces.splice(j,1); merged=true; break;
           }
           if (a.x===b.x && a.y===b.y && a.w===b.w && a.h===b.h && b.z+b.d===a.z && a.isFloor===b.isFloor) {
             a.z = b.z; a.d += b.d; this.spaces.splice(j,1); merged=true; break;
           }
-          // 左右合并 (x方向)
           if (a.y===b.y && a.z===b.z && a.d===b.d && a.h===b.h && a.x+a.w===b.x && a.isFloor===b.isFloor) {
             a.w += b.w; this.spaces.splice(j,1); merged=true; break;
           }
@@ -117,54 +107,48 @@ class SpaceManager {
     }
   }
 
-  // 判断空间是否为顶层（顶面接触车厢顶）
   isTopSpace(space) {
     return Math.abs(space.y + space.h - this.th) < 0.01;
   }
 
-  queryPlace(bw, bd, bh, originalW, originalD, originalH) {
+  // 查询放置，返回所有可行方案列表（供 LMH 选择）
+  queryAllPlacements(originalW, originalD, originalH) {
     this.mergeSpaces();
-    let best = null;
+    const candidates = [];
     for (let i = 0; i < this.spaces.length; i++) {
       const s = this.spaces[i];
-      // 支撑检查：底面必须是箱子托举（isFloor=false）或者是地板(y=0)
-      if (s.isFloor && s.y > 0) continue; // 地板且非底层，拒绝
-      
-      // 确定允许的方向
+      if (s.isFloor && s.y > 0) continue;
       const topLayer = this.isTopSpace(s);
       const orientations = getAllowedOrientations(originalW, originalD, originalH, topLayer);
-      
       for (let [ow, od, oh] of orientations) {
         if (ow <= s.w && od <= s.d && oh <= s.h) {
-          // 计算接触得分
-          let contact = 0;
-          if (s.z === 0) contact += ow * oh; // 贴车头
-          if (s.y === 0) contact += ow * od; // 贴地板（此处s.y=0说明是地板，但会被isFloor条件拦住，除非s.y=0允许）
-          if (s.x === 0) contact += od * oh; // 贴左壁
-          // 额外奖励：底面是箱子支撑（已通过isFloor过滤，到这里都是箱子支撑）
-          if (!s.isFloor) contact += ow * od * 0.5; // 箱子支撑奖励
-          
-          const score = contact + (ow*od*oh)*0.001;
-          if (!best || score > best.score) {
-            best = { idx: i, bw:ow, bd:od, bh:oh, score };
-          }
+          // 计算剩余空间质量（用于 LMH）
+          const spacesAfter = this._simulatePlacement(s, ow, od, oh);
+          const minDim = spacesAfter.reduce((min, sp) => Math.min(min, Math.min(sp.w, sp.d, sp.h)), Infinity);
+          candidates.push({ idx: i, bw:ow, bd:od, bh:oh, minDim, s });
         }
       }
     }
-    return best;
+    return candidates;
   }
 
-  applyPlace(idx, bw, bd, bh, isFloorSource) {
+  _simulatePlacement(s, bw, bd, bh) {
+    const newSpaces = [];
+    if (s.w - bw > 0) newSpaces.push({ w: s.w-bw, d: s.d, h: s.h });
+    if (s.h - bh > 0) newSpaces.push({ w: bw, d: s.d, h: s.h-bh });
+    if (s.d - bd > 0) newSpaces.push({ w: bw, d: s.d-bd, h: bh });
+    // 简单合并模拟（粗略）
+    return newSpaces;
+  }
+
+  applyPlace(idx, bw, bd, bh) {
     const s = this.spaces[idx];
     const pos = { x: s.x, y: s.y, z: s.z };
     const newSpaces = [];
-    // 右侧空间 (保持原底面属性)
     if (s.w - bw > 0)
       newSpaces.push({ x: s.x+bw, y: s.y, z: s.z, w: s.w-bw, d: s.d, h: s.h, isFloor: s.isFloor });
-    // 上方空间 (底面是刚放的箱子顶面，非地板)
     if (s.h - bh > 0)
       newSpaces.push({ x: s.x, y: s.y+bh, z: s.z, w: bw, d: s.d, h: s.h-bh, isFloor: false });
-    // 前方空间 (保持原底面属性)
     if (s.d - bd > 0)
       newSpaces.push({ x: s.x, y: s.y, z: s.z+bd, w: bw, d: s.d-bd, h: bh, isFloor: s.isFloor });
 
@@ -175,209 +159,143 @@ class SpaceManager {
   }
 }
 
-// ==================== 相邻分布（块模式） ====================
+// ==================== 相邻分布 ====================
 function packAdjacent(tw, td, th, boxes) {
   const sm = new SpaceManager(tw, td, th);
-  const placed = [];
-  const steps = [];
-
+  const placed = []; const steps = [];
   for (let box of boxes) {
-    // 为当前种类寻找一个紧凑块（只允许水平旋转）
-    let bestBlock = null;
-    const ori = getAllowedOrientations(box.w, box.d, box.h, false); // 块内部不允许倒下
+    let best = null;
+    const ori = getAllowedOrientations(box.w, box.d, box.h, false);
     for (let [bw, bd, bh] of ori) {
-      const maxA = Math.floor(tw / bw);
-      const maxB = Math.floor(td / bd);
-      const maxC = Math.floor(th / bh);
-      if (maxA * maxB * maxC < box.count) continue;
-      for (let a = 1; a <= maxA; a++) {
-        for (let b = 1; b <= maxB; b++) {
-          const c = Math.ceil(box.count / (a * b));
-          if (c > maxC) continue;
-          const w = a*bw, d = b*bd, h = c*bh;
-          const vol = w * d * h;
-          if (!bestBlock || vol < bestBlock.vol) {
-            bestBlock = { a, b, c, bw, bd, bh, w, d, h, vol, name: box.name, count: box.count };
-          }
-        }
+      const maxA = Math.floor(tw/bw), maxB = Math.floor(td/bd), maxC = Math.floor(th/bh);
+      if (maxA*maxB*maxC < box.count) continue;
+      for (let a=1;a<=maxA;a++) for (let b=1;b<=maxB;b++) {
+        const c = Math.ceil(box.count/(a*b)); if (c>maxC) continue;
+        const w=a*bw, d=b*bd, h=c*bh, vol=w*d*h;
+        if (!best || vol < best.vol) best = {a,b,c,bw,bd,bh,w,d,h,vol,name:box.name,count:box.count};
       }
     }
-    if (!bestBlock) return { success: false, placed: [], steps: [] };
-
-    // 尝试放置整个块
-    const q = sm.queryPlace(bestBlock.w, bestBlock.d, bestBlock.h, bestBlock.bw, bestBlock.bd, bestBlock.bh);
-    if (!q) return { success: false, placed: [], steps: [] };
-
-    const pos = sm.applyPlace(q.idx, q.bw, q.bd, q.bh, false); // 上方空间非地板
-    let remaining = bestBlock.count;
-    for (let k = 0; k < bestBlock.c && remaining > 0; k++) {
-      for (let j = 0; j < bestBlock.b && remaining > 0; j++) {
-        for (let i = 0; i < bestBlock.a && remaining > 0; i++) {
-          placed.push({
-            name: bestBlock.name,
-            x: pos.x + i * bestBlock.bw,
-            y: pos.y + k * bestBlock.bh,
-            z: pos.z + j * bestBlock.bd,
-            w: bestBlock.bw, d: bestBlock.bd, h: bestBlock.bh
-          });
-          remaining--;
-        }
-      }
+    if (!best) return {success:false,placed:[],steps:[]};
+    const cands = sm.queryAllPlacements(best.bw, best.bd, best.bh);
+    if (cands.length===0) return {success:false,placed:[],steps:[]};
+    const chosen = cands.reduce((a,b) => a.minDim > b.minDim ? a : b); // 用LMH选择块位置
+    const pos = sm.applyPlace(chosen.idx, chosen.bw, chosen.bd, chosen.bh);
+    let rem = best.count;
+    for (let k=0;k<best.c&&rem;k++) for (let j=0;j<best.b&&rem;j++) for (let i=0;i<best.a&&rem;i++) {
+      placed.push({name:best.name, x:pos.x+i*best.bw, y:pos.y+k*best.bh, z:pos.z+j*best.bd, w:best.bw, d:best.bd, h:best.bh});
+      rem--;
     }
-    steps.push(`“${bestBlock.name}”${bestBlock.count}个排成 ${bestBlock.a}×${bestBlock.b}×${bestBlock.c} 块，放在(${pos.x},${pos.y},${pos.z})`);
+    steps.push(`“${best.name}”块在(${pos.x},${pos.y},${pos.z})`);
   }
-  return { success: true, placed, steps };
+  return {success:true, placed, steps};
 }
 
-// ==================== 占空间最小（混装） ====================
-function packSpaceMin(tw, td, th, boxes) {
+// ==================== 占空间最小 ====================
+function packSpaceMin(tw, td, th, boxes, useLMH=false) {
   const sm = new SpaceManager(tw, td, th);
-  const placed = [];
-  const steps = [];
-
-  // 展开所有箱子项
+  const placed = []; const steps = [];
   const items = [];
-  for (let box of boxes) {
-    for (let i = 0; i < box.count; i++) {
-      items.push({ name: box.name, w: box.w, d: box.d, h: box.h });
-    }
-  }
-  // 按体积降序
+  for (let b of boxes) for (let i=0;i<b.count;i++) items.push({name:b.name, w:b.w, d:b.d, h:b.h});
   items.sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
 
-  // 逐个放置
-  for (let i = 0; i < items.length; i++) {
+  for (let i=0;i<items.length;i++) {
     const item = items[i];
-    const q = sm.queryPlace(item.w, item.d, item.h, item.w, item.d, item.h);
-    if (!q) return { success: false, placed, steps };
-
-    const pos = sm.applyPlace(q.idx, q.bw, q.bd, q.bh, false);
-    placed.push({ name: item.name, x: pos.x, y: pos.y, z: pos.z, w: q.bw, d: q.bd, h: q.bh });
-    steps.push(`放置 ${item.name} 于 (${pos.x},${pos.y},${pos.z}) 尺寸 ${q.bw}×${q.bd}×${q.bh}${q.bh !== item.h ? '(侧放)' : ''}`);
+    const cands = sm.queryAllPlacements(item.w, item.d, item.h);
+    if (cands.length===0) return {success:false, placed, steps};
+    // 选择：若是LMH则选minDim最大的，否则选体积大且接触好的（原逻辑）
+    let chosen;
+    if (useLMH) {
+      chosen = cands.reduce((a,b) => a.minDim > b.minDim ? a : b);
+    } else {
+      // 原贪心：选体积*接触
+      chosen = cands.reduce((a,b) => {
+        const scoreA = (a.bw*a.bd*a.bh) + (a.s.z===0?a.bw*a.bh:0)+(a.s.y===0?a.bw*a.bd:0);
+        const scoreB = (b.bw*b.bd*b.bh) + (b.s.z===0?b.bw*b.bh:0)+(b.s.y===0?b.bw*b.bd:0);
+        return scoreA > scoreB ? a : b;
+      });
+    }
+    const pos = sm.applyPlace(chosen.idx, chosen.bw, chosen.bd, chosen.bh);
+    placed.push({name:item.name, x:pos.x, y:pos.y, z:pos.z, w:chosen.bw, d:chosen.bd, h:chosen.bh});
+    steps.push(`放置 ${item.name} 于 (${pos.x},${pos.y},${pos.z}) 尺寸 ${chosen.bw}×${chosen.bd}×${chosen.bh}${chosen.bh!==item.h?'(侧放)':''}`);
   }
-  return { success: true, placed, steps };
+  return {success:true, placed, steps};
 }
 
 // ==================== 3D 渲染 ====================
-let scene, camera, renderer, controls;
+let scene,camera,renderer,controls;
 function init3D() {
-  const container = document.getElementById('viewer');
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x1a1a2e);
-  camera = new THREE.PerspectiveCamera(50, container.clientWidth/container.clientHeight, 10, 3000);
-  camera.position.set(600, 500, 800);
-  camera.lookAt(100, 100, 200);
-  renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setSize(container.clientWidth, container.clientHeight);
-  container.appendChild(renderer.domElement);
+  const c = document.getElementById('viewer');
+  scene = new THREE.Scene(); scene.background = new THREE.Color(0x1a1a2e);
+  camera = new THREE.PerspectiveCamera(50, c.clientWidth/c.clientHeight, 10, 3000);
+  camera.position.set(600,500,800); camera.lookAt(100,100,200);
+  renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(c.clientWidth, c.clientHeight);
+  c.appendChild(renderer.domElement);
   controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(120, 120, 250);
-  controls.update();
-  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-  const light = new THREE.DirectionalLight(0xffffff, 0.8);
-  light.position.set(300, 500, 400);
-  scene.add(light);
-  window.addEventListener('resize', () => {
-    camera.aspect = container.clientWidth / container.clientHeight;
+  controls.target.set(120,120,250); controls.update();
+  scene.add(new THREE.AmbientLight(0xffffff,0.6));
+  const l = new THREE.DirectionalLight(0xffffff,0.8); l.position.set(300,500,400); scene.add(l);
+  window.addEventListener('resize',()=>{
+    camera.aspect = c.clientWidth/c.clientHeight;
     camera.updateProjectionMatrix();
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setSize(c.clientWidth, c.clientHeight);
   });
 }
-
 function drawTruck(w,d,h) {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  const mat = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
-  const truck = new THREE.Mesh(geo, mat);
-  truck.position.set(w/2, h/2, d/2);
-  scene.add(truck);
+  const g = new THREE.BoxGeometry(w,h,d);
+  const m = new THREE.MeshBasicMaterial({color:0x00ff00, wireframe:true});
+  const t = new THREE.Mesh(g,m); t.position.set(w/2,h/2,d/2); scene.add(t);
 }
-
 function drawBoxes(placed) {
-  const colors = ['#e94560','#f5a623','#43d8c9','#6c5ce7'];
-  const colorMap = {};
-  let idx = 0;
-  for (let item of placed) {
-    if (!colorMap[item.name]) colorMap[item.name] = colors[idx++ % colors.length];
-    const color = colorMap[item.name];
-    const geo = new THREE.BoxGeometry(item.w, item.h, item.d);
-    const mat = new THREE.MeshPhongMaterial({ color, transparent:true, opacity:0.75 });
-    const cube = new THREE.Mesh(geo, mat);
-    cube.position.set(item.x + item.w/2, item.y + item.h/2, item.z + item.d/2);
+  const cols=['#e94560','#f5a623','#43d8c9','#6c5ce7'], map={}; let idx=0;
+  for(let i of placed){
+    if(!map[i.name]) map[i.name]=cols[idx++%cols.length];
+    const g=new THREE.BoxGeometry(i.w,i.h,i.d);
+    const m=new THREE.MeshPhongMaterial({color:map[i.name],transparent:true,opacity:0.75});
+    const cube=new THREE.Mesh(g,m); cube.position.set(i.x+i.w/2,i.y+i.h/2,i.z+i.d/2);
     scene.add(cube);
-    cube.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({color:0xffffff})));
+    cube.add(new THREE.LineSegments(new THREE.EdgesGeometry(g),new THREE.LineBasicMaterial({color:0xffffff})));
   }
 }
-
-function clearScene() {
+function clearScene(){
   while(scene.children.length) scene.remove(scene.children[0]);
   scene.add(new THREE.AmbientLight(0xffffff,0.6));
-  const l = new THREE.DirectionalLight(0xffffff,0.8);
-  l.position.set(300,500,400);
-  scene.add(l);
+  const l=new THREE.DirectionalLight(0xffffff,0.8); l.position.set(300,500,400); scene.add(l);
 }
 
 // ==================== UI ====================
-function addBoxRow(name='',w='',d='',h='',cnt='') {
-  const div = document.createElement('div');
-  div.className = 'box-row';
-  div.innerHTML = `
-    <input class="boxName" placeholder="名称" value="${name}">
-    <input class="boxW" type="number" placeholder="宽" value="${w}">
-    <input class="boxD" type="number" placeholder="深" value="${d}">
-    <input class="boxH" type="number" placeholder="高" value="${h}">
-    <input class="boxCount" type="number" placeholder="数量" value="${cnt}">
-    <button class="delBox">✕</button>`;
-  div.querySelector('.delBox').onclick = () => div.remove();
+function addBoxRow(name='',w='',d='',h='',cnt=''){
+  const div=document.createElement('div'); div.className='box-row';
+  div.innerHTML=`<input class="boxName" placeholder="名称" value="${name}"><input class="boxW" type="number" placeholder="宽" value="${w}"><input class="boxD" type="number" placeholder="深" value="${d}"><input class="boxH" type="number" placeholder="高" value="${h}"><input class="boxCount" type="number" placeholder="数量" value="${cnt}"><button class="delBox">✕</button>`;
+  div.querySelector('.delBox').onclick=()=>div.remove();
   document.getElementById('boxList').appendChild(div);
 }
-
-function getBoxes() {
-  return Array.from(document.querySelectorAll('#boxList .box-row')).map(r => ({
+function getBoxes(){
+  return Array.from(document.querySelectorAll('#boxList .box-row')).map(r=>({
     name: r.querySelector('.boxName').value,
     w: +r.querySelector('.boxW').value,
     d: +r.querySelector('.boxD').value,
     h: +r.querySelector('.boxH').value,
     count: +r.querySelector('.boxCount').value
-  })).filter(b => b.w>0 && b.d>0 && b.h>0 && b.count>0);
+  })).filter(b=>b.w&&b.d&&b.h&&b.count);
 }
 
-async function calculate() {
-  const tw = +document.getElementById('tw').value;
-  const td = +document.getElementById('td').value;
-  const th = +document.getElementById('th').value;
-  const boxes = getBoxes();
-  if (!tw||!td||!th||!boxes.length) return alert('请完整填写尺寸和至少一个纸箱');
-
-  const mode = document.getElementById('mode').value;
+async function calculate(){
+  const tw=+document.getElementById('tw').value, td=+document.getElementById('td').value, th=+document.getElementById('th').value;
+  const boxes=getBoxes();
+  if(!tw||!td||!th||!boxes.length) return alert('请填完整');
+  const mode=document.getElementById('mode').value;
   let result;
-  const adjRes = packAdjacent(tw, td, th, boxes);
-  if (mode === 'adjacent') {
-    result = adjRes;
-  } else if (mode === 'space') {
-    result = packSpaceMin(tw, td, th, boxes);
-  } else {
-    if (adjRes.success) {
-      result = adjRes;
-      document.getElementById('resultText').textContent = '✅ 采用“相邻分布”方案：\n' + adjRes.steps.join('\n');
-    } else {
-      result = packSpaceMin(tw, td, th, boxes);
-      if (result.success) {
-        document.getElementById('resultText').textContent = '⚠️ 相邻分布失败，切换为“占空间最小”方案：\n' + result.steps.join('\n');
-      } else {
-        document.getElementById('resultText').textContent = '❌ 无法装入所有箱子，请检查尺寸。';
-        return;
-      }
-    }
+  if(mode==='adjacent') result=packAdjacent(tw,td,th,boxes);
+  else if(mode==='space') result=packSpaceMin(tw,td,th,boxes,false);
+  else if(mode==='lmh') result=packSpaceMin(tw,td,th,boxes,true);
+  else { // auto
+    result=packAdjacent(tw,td,th,boxes);
+    if(!result.success) result=packSpaceMin(tw,td,th,boxes,true);
   }
-
-  if (!result.success) {
-    document.getElementById('resultText').textContent = '❌ 装不下所有箱子。';
-    return;
-  }
-  document.getElementById('resultText').textContent = `✅ 成功装入 ${result.placed.length} 个箱子\n` + result.steps.join('\n');
-  clearScene();
-  drawTruck(tw, td, th);
-  drawBoxes(result.placed);
+  if(!result.success) { document.getElementById('resultText').textContent='❌ 装不下'; return; }
+  document.getElementById('resultText').textContent=`✅ 装入 ${result.placed.length} 箱\n`+result.steps.join('\n');
+  clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
 }
 
 // 默认数据
@@ -386,16 +304,10 @@ addBoxRow('纸箱B','43','43','72','50');
 addBoxRow('纸箱C','40','40','52','100');
 addBoxRow('纸箱D','32','32','51','100');
 
-document.getElementById('addBoxBtn').onclick = () => addBoxRow();
-document.getElementById('calcBtn').onclick = calculate;
-init3D();
-drawTruck(235,589,239);
-
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
-}
+document.getElementById('addBoxBtn').onclick=()=>addBoxRow();
+document.getElementById('calcBtn').onclick=calculate;
+init3D(); drawTruck(235,589,239);
+function animate(){ requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); }
 animate();
 </script>
 </body>
