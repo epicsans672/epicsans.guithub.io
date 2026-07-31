@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>智能装箱计算器</title>
+  <title>智能装箱计算器（无重叠版）</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; }
@@ -53,7 +53,6 @@
   <div id="viewer"></div>
 </div>
 
-<!-- 使用 jsdelivr CDN 国内可用 -->
 <script type="importmap">
   {
     "imports": {
@@ -67,7 +66,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ---------- 工具函数 ----------
+// ---------- 辅助函数 ----------
 function permuteDims(w, d, h) {
   const arr = [w, d, h];
   const res = new Set();
@@ -80,128 +79,144 @@ function permuteDims(w, d, h) {
   return Array.from(res).map(s => s.split(',').map(Number));
 }
 
-// ---------- 修正后的剩余空间管理（绝不重叠）----------
-class SpaceManager {
-  constructor(tw, td, th) {
-    this.spaces = [{ x:0, y:0, z:0, w:tw, d:td, h:th }];
-  }
-
-  tryPlace(bw, bd, bh) {
-    // 优先从低到高（y），从里到外（z），从左到右（x）
-    this.spaces.sort((a,b) => a.y - b.y || a.z - b.z || a.x - b.x);
-    for (let i = 0; i < this.spaces.length; i++) {
-      const s = this.spaces[i];
-      if (bw <= s.w && bd <= s.d && bh <= s.h) {
-        const pos = { x: s.x, y: s.y, z: s.z };
-        const newSpaces = [];
-        // 上方空间（y方向剩余）
-        if (s.h - bh > 0) {
-          newSpaces.push({ x: s.x, y: s.y + bh, z: s.z, w: bw, d: bd, h: s.h - bh });
-        }
-        // 右侧空间（x方向剩余）
-        if (s.w - bw > 0) {
-          newSpaces.push({ x: s.x + bw, y: s.y, z: s.z, w: s.w - bw, d: s.d, h: bh });
-        }
-        // 前方空间（z方向剩余，即深度方向）
-        if (s.d - bd > 0) {
-          newSpaces.push({ x: s.x, y: s.y, z: s.z + bd, w: s.w, d: s.d - bd, h: bh });
-        }
-        this.spaces.splice(i, 1);
-        this.spaces.push(...newSpaces);
-        return pos;
-      }
-    }
-    return null;
-  }
+// 判断两个长方体是否重叠（边界接触不算重叠）
+function isOverlap(a, b) {
+  return (
+    a.x < b.x + b.w && a.x + a.w > b.x &&
+    a.y < b.y + b.h && a.y + a.h > b.y &&
+    a.z < b.z + b.d && a.z + a.d > b.z
+  );
 }
 
-// ---------- 相邻分布算法 ----------
+// ---------- 装箱算法 ----------
 function packAdjacent(tw, td, th, boxes) {
-  const blocks = [];
+  const placed = [];
   const steps = [];
+
   for (let box of boxes) {
-    let best = null;
+    // 为当前种类箱子寻找一个能容纳其全部数量的长方体块
+    let bestBlock = null;
     for (let [bw, bd, bh] of permuteDims(box.w, box.d, box.h)) {
       const maxA = Math.floor(tw / bw);
       const maxB = Math.floor(td / bd);
       const maxC = Math.floor(th / bh);
-      if (maxA * maxB * maxC >= box.count) {
-        let minVol = Infinity;
-        let bestABC = null;
-        for (let a = 1; a <= maxA; a++) {
-          for (let b = 1; b <= maxB; b++) {
-            const c = Math.ceil(box.count / (a * b));
-            if (c <= maxC) {
-              const vol = (a*bw) * (b*bd) * (c*bh);
-              if (vol < minVol) {
-                minVol = vol;
-                bestABC = { a, b, c, w: a*bw, d: b*bd, h: c*bh };
-              }
-            }
-          }
-        }
-        if (bestABC && bestABC.w <= tw && bestABC.d <= td && bestABC.h <= th) {
-          if (!best || bestABC.w*bestABC.d*bestABC.h < best.w*best.d*best.h) {
-            best = { ...bestABC, name: box.name, count: box.count, bw, bd, bh };
+      if (maxA * maxB * maxC < box.count) continue;
+
+      // 寻找最小体积的块
+      for (let a = 1; a <= maxA; a++) {
+        for (let b = 1; b <= maxB; b++) {
+          const c = Math.ceil(box.count / (a * b));
+          if (c > maxC) continue;
+          const blockW = a * bw, blockD = b * bd, blockH = c * bh;
+          const vol = blockW * blockD * blockH;
+          if (!bestBlock || vol < bestBlock.vol) {
+            bestBlock = { a, b, c, bw, bd, bh, w: blockW, d: blockD, h: blockH, vol, name: box.name, count: box.count };
           }
         }
       }
     }
-    if (!best) return { success: false, placed: [], steps: [] };
-    blocks.push(best);
-    steps.push(`将“${box.name}”${box.count}个排列成 ${best.a}×${best.b}×${best.c} 的块（宽${best.w} 深${best.d} 高${best.h}cm）`);
-  }
 
-  const sm = new SpaceManager(tw, td, th);
-  const placed = [];
-  const blockSteps = [];
-  for (let block of blocks) {
-    const pos = sm.tryPlace(block.w, block.d, block.h);
-    if (!pos) return { success: false, placed: [], steps: [] };
-    let countRemaining = block.count;
-    for (let k = 0; k < block.c && countRemaining > 0; k++) {
-      for (let j = 0; j < block.b && countRemaining > 0; j++) {
-        for (let i = 0; i < block.a && countRemaining > 0; i++) {
-          const cx = pos.x + i * block.bw;
-          const cy = pos.y + k * block.bh;
-          const cz = pos.z + j * block.bd;
+    if (!bestBlock) return { success: false, placed: [], steps: [] };
+
+    // 尝试将该块放入车厢（不旋转块），用碰撞检测找一个合法位置
+    const block = bestBlock;
+    let blockPos = null;
+
+    // 在车厢内遍历所有可能的整数坐标（步长1cm可能太慢，我们使用较大的步长或只在已放置箱子的表面尝试）
+    // 这里采用贪婪角落定位：按从低到高、从里到外、从左到右搜索
+    out:
+    for (let y = 0; y <= th - block.h; y++) {
+      for (let z = 0; z <= td - block.d; z++) {
+        for (let x = 0; x <= tw - block.w; x++) {
+          const candidate = { x, y, z, w: block.w, d: block.d, h: block.h };
+          let overlap = false;
+          for (let p of placed) {
+            if (isOverlap(candidate, p)) {
+              overlap = true;
+              break;
+            }
+          }
+          if (!overlap) {
+            blockPos = { x, y, z };
+            break out;
+          }
+        }
+      }
+    }
+
+    if (!blockPos) return { success: false, placed: [], steps: [] };
+
+    // 展开块内的箱子
+    let remaining = block.count;
+    for (let k = 0; k < block.c && remaining > 0; k++) {
+      for (let j = 0; j < block.b && remaining > 0; j++) {
+        for (let i = 0; i < block.a && remaining > 0; i++) {
+          const cx = blockPos.x + i * block.bw;
+          const cy = blockPos.y + k * block.bh;
+          const cz = blockPos.z + j * block.bd;
           placed.push({
             name: block.name,
             x: cx, y: cy, z: cz,
             w: block.bw, d: block.bd, h: block.bh
           });
-          countRemaining--;
+          remaining--;
         }
       }
     }
-    blockSteps.push(`整块放置在 左后下角 (${pos.x},${pos.y},${pos.z})，内部箱子按从左到右、从里到外、从下到上排列`);
+
+    steps.push(
+      `将“${block.name}”${block.count}个排列成 ${block.a}×${block.b}×${block.c} 的块（宽${block.w} 深${block.d} 高${block.h}cm），` +
+      `放置在 (${blockPos.x},${blockPos.y},${blockPos.z})。` +
+      `内部箱子排列：从该位置的左后下角开始，先向右排${block.a}个，再向前排${block.b}排，再向上堆叠${block.c}层。`
+    );
   }
-  return { success: true, placed, steps: [...steps, ...blockSteps] };
+
+  return { success: true, placed, steps };
 }
 
-// ---------- 占空间最小算法 ----------
 function packSpaceMin(tw, td, th, boxes) {
-  const sm = new SpaceManager(tw, td, th);
   const placed = [];
+  const steps = [];
+  // 展开所有箱子为独立项
   const items = [];
   for (let box of boxes) {
     for (let i = 0; i < box.count; i++) {
       items.push({ name: box.name, dims: permuteDims(box.w, box.d, box.h) });
     }
   }
-  // 按体积从大到小排列，提高利用率
-  items.sort((a,b) => {
-    const vol = arr => arr[0]*arr[1]*arr[2];
+  // 按体积从大到小排序
+  items.sort((a, b) => {
+    const vol = arr => arr[0] * arr[1] * arr[2];
     return vol(b.dims[0]) - vol(a.dims[0]);
   });
-  const steps = [];
+
   for (let item of items) {
     let placedOne = false;
+    // 尝试所有方向，选第一个不重叠的位置
     for (let [bw, bd, bh] of item.dims) {
-      const pos = sm.tryPlace(bw, bd, bh);
-      if (pos) {
-        placed.push({ name: item.name, x: pos.x, y: pos.y, z: pos.z, w: bw, d: bd, h: bh });
-        steps.push(`放置 ${item.name} 于 (${pos.x},${pos.y},${pos.z}) 尺寸 ${bw}×${bd}×${bh}`);
+      let foundPos = null;
+      out:
+      for (let y = 0; y <= th - bh; y++) {
+        for (let z = 0; z <= td - bd; z++) {
+          for (let x = 0; x <= tw - bw; x++) {
+            const cand = { x, y, z, w: bw, d: bd, h: bh };
+            let overlap = false;
+            for (let p of placed) {
+              if (isOverlap(cand, p)) {
+                overlap = true;
+                break;
+              }
+            }
+            if (!overlap) {
+              foundPos = { x, y, z };
+              break out;
+            }
+          }
+        }
+      }
+      if (foundPos) {
+        placed.push({ name: item.name, x: foundPos.x, y: foundPos.y, z: foundPos.z, w: bw, d: bd, h: bh });
+        steps.push(`放置 ${item.name} 于 (${foundPos.x},${foundPos.y},${foundPos.z})，方向 ${bw}×${bd}×${bh}`);
         placedOne = true;
         break;
       }
@@ -351,7 +366,6 @@ async function calculate() {
   drawBoxes(result.placed);
 }
 
-// 初始化
 document.getElementById('addBoxBtn').onclick = addBoxRow;
 document.getElementById('calcBtn').onclick = calculate;
 addBoxRow();
