@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 大箱顶放小箱</title>
+  <title>货车装箱 - 分层天际线 + 顶部填充</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
@@ -37,7 +37,7 @@
     <div style="margin-top:15px;">
       <label>算法</label>
       <select id="mode">
-        <option value="skyline" selected>分层天际线+顶放优化 (推荐)</option>
+        <option value="skyline" selected>分层天际线 + 顶部填充</option>
         <option value="skyline-fast">单次模式</option>
       </select>
     </div>
@@ -77,10 +77,11 @@ class Skyline2D {
     let bestX = -1, bestY = Infinity;
     for (let i = 0; i < this.lines.length; i++) {
       const line = this.lines[i];
-      let y = line.y, j = i, x = line.x, maxY = y, remainingW = w;
+      let y = line.y;
+      let j = i, remainingW = w, maxY = y;
       while (remainingW > 0 && j < this.lines.length) {
         const nextLine = this.lines[j];
-        const widthAvail = (j < this.lines.length-1 ? this.lines[j+1].x - nextLine.x : this.W - nextLine.x);
+        const widthAvail = (j < this.lines.length - 1 ? this.lines[j+1].x - nextLine.x : this.W - nextLine.x);
         const useW = Math.min(widthAvail, remainingW);
         maxY = Math.max(maxY, nextLine.y);
         remainingW -= useW;
@@ -88,7 +89,7 @@ class Skyline2D {
       }
       if (remainingW === 0 && maxY + h <= this.H && y < bestY) {
         bestY = y;
-        bestX = x;
+        bestX = line.x;
       }
     }
     if (bestX === -1) return null;
@@ -106,16 +107,11 @@ class Skyline2D {
     while (i < this.lines.length && this.lines[i].x < x + w) i++;
     if (i < this.lines.length) {
       const right = this.lines[i];
-      if (right.x > x + w) {
-        newLines.push({ x: x + w, y: this._getYAt(x + w) });
-      }
-      while (i < this.lines.length) {
-        newLines.push({...this.lines[i]}); i++;
-      }
+      if (right.x > x + w) newLines.push({ x: x + w, y: this._getYAt(x + w) });
+      while (i < this.lines.length) newLines.push({...this.lines[i]}); i++;
     } else if (x + w < this.W) {
       newLines.push({ x: x + w, y: 0 });
     }
-    // 合并相同高度的线段
     this.lines = [];
     for (let seg of newLines) {
       if (this.lines.length > 0 && this.lines[this.lines.length-1].y === seg.y) {
@@ -134,120 +130,157 @@ class Skyline2D {
   }
 }
 
-// =============== 分层装箱 + 顶部放小箱 ===============
-function layerPack(tw, td, th, items) {
+// =============== 分层装箱 ===============
+function layerPack(tw, td, th, items, canTiltTop = true) {
   const placed = [];
   const steps = [];
   let z = 0;
-  let remaining = [...items].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+  const sorted = [...items].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
+  let remaining = [...sorted];
 
-  // 第一阶段：分层天际线填充
   while (remaining.length > 0 && z < td) {
-    // 寻找可用的层深
     let layerDepth = null;
-    for (let item of remaining) {
+    for (let i = 0; i < remaining.length; i++) {
+      const item = remaining[i];
       const oris = getOrientations(item.w, item.d, item.h, false);
       for (let [ow, od, oh] of oris) {
-        if (z + od <= td && oh <= th) {
-          layerDepth = od;
-          break;
-        }
+        if (z + od <= td && oh <= th) { layerDepth = od; break; }
       }
       if (layerDepth) break;
     }
-    if (!layerDepth) {
-      layerDepth = Math.min(td - z, ...remaining.map(i => Math.min(i.w, i.d)));
-      if (layerDepth <= 0) break;
-    }
+    if (!layerDepth) { z += 1; continue; }
 
-    // 收集深度匹配的箱子
     const candidates = [];
     for (let i = remaining.length-1; i >= 0; i--) {
       const item = remaining[i];
       const oris = getOrientations(item.w, item.d, item.h, false);
+      let found = false;
       for (let [ow, od, oh] of oris) {
         if (od === layerDepth && oh <= th) {
           candidates.push({ item, ow, od, oh });
           remaining.splice(i, 1);
+          found = true;
           break;
         }
       }
+      if (!found) {
+        // 尝试其他深度？直接跳过
+      }
     }
-
-    if (candidates.length === 0) {
-      z += layerDepth;
-      continue;
-    }
+    if (candidates.length === 0) { z += layerDepth; continue; }
 
     const sky2d = new Skyline2D(tw, th);
     for (let cand of candidates) {
-      const pos = sky2d.tryPlace(cand.ow, cand.oh);
+      const { ow, oh, item } = cand;
+      const pos = sky2d.tryPlace(ow, oh);
       if (pos) {
-        placed.push({
-          name: cand.item.name,
-          x: pos.x, y: pos.y, z: z,
-          w: cand.ow, d: cand.od, h: cand.oh
-        });
-        steps.push(`${cand.item.name} 于 (${pos.x},${pos.y},${z}) ${cand.ow}×${cand.od}×${cand.oh}`);
+        placed.push({ name: item.name, x: pos.x, y: pos.y, z: z, w: ow, d: layerDepth, h: oh });
+        steps.push(`${item.name} 于 (${pos.x},${pos.y},${z}) 尺寸 ${ow}×${layerDepth}×${oh}`);
       } else {
-        remaining.push(cand.item); // 放回
+        remaining.push(item); // 放回去
       }
     }
     z += layerDepth;
   }
 
-  // 第二阶段：尝试在已放置箱子顶部放剩余小箱
-  if (remaining.length > 0) {
-    for (let i = remaining.length-1; i >= 0; i--) {
-      const item = remaining[i];
+  // 最后尝试允许侧放填充剩余
+  if (remaining.length > 0 && z < td) {
+    const sky2d = new Skyline2D(tw, th);
+    for (let item of [...remaining]) {
+      const oris = getOrientations(item.w, item.d, item.h, true);
       let placedFlag = false;
-      // 寻找能托住该箱子的顶部区域
-      for (let p of placed) {
-        const topY = p.y + p.h;
-        if (topY >= th) continue;
-        // 检查顶面尺寸是否足够
-        const oris = getOrientations(item.w, item.d, item.h, true); // 允许侧放
-        for (let [ow, od, oh] of oris) {
-          if (ow <= p.w && od <= p.d && topY + oh <= th) {
-            // 检查该区域是否空置（简单起见，先假设顶部平坦且未被占用）
-            // 因为当前算法不会在同一层顶部放置重叠，所以我们直接放
-            placed.push({
-              name: item.name,
-              x: p.x, y: topY, z: p.z,
-              w: ow, d: od, h: oh
-            });
-            steps.push(`${item.name} 放在 (${p.x},${p.y+p.h},${p.z}) 顶部 ${ow}×${od}×${oh}`);
-            remaining.splice(i, 1);
+      for (let [ow, od, oh] of oris) {
+        if (z + od <= td && oh <= th) {
+          const pos = sky2d.tryPlace(ow, oh);
+          if (pos) {
+            placed.push({ name: item.name, x: pos.x, y: pos.y, z: z, w: ow, d: od, h: oh });
+            steps.push(`${item.name} 于 (${pos.x},${pos.y},${z}) 尺寸 ${ow}×${od}×${oh} (侧放)`);
+            remaining.splice(remaining.indexOf(item), 1);
             placedFlag = true;
             break;
           }
         }
-        if (placedFlag) break;
       }
     }
   }
 
-  return {
-    success: remaining.length === 0,
-    placed,
-    steps,
-    remainingCount: remaining.length
-  };
+  return { success: placed.length === items.length, placed, steps, remaining };
 }
 
-// =============== 多次随机贪心 ===============
+// =============== 顶部空隙填充 ===============
+function fillTopGaps(tw, td, th, placed, remainingItems) {
+  // 按底面积升序排序（小箱子优先）
+  const sortedRemaining = [...remainingItems].sort((a,b) => (a.w*a.d) - (b.w*b.d));
+  let updatedPlaced = [...placed];
+  let updatedSteps = [];
+  let changed = true;
+  
+  while (changed) {
+    changed = false;
+    for (let i = sortedRemaining.length-1; i >= 0; i--) {
+      const item = sortedRemaining[i];
+      const oris = getOrientations(item.w, item.d, item.h, true);
+      let bestPlacement = null;
+      for (let [ow, od, oh] of oris) {
+        // 寻找一个已放置箱子，其顶面可以完全承载该箱子
+        for (let p of updatedPlaced) {
+          if (p.y + p.h + oh > th) continue; // 超出高度
+          if (ow > p.w || od > p.d) continue; // 底面积必须小于等于下方箱子
+          // 支撑范围：上方箱子底面必须完全在下方程子顶面内
+          const x1 = p.x, x2 = p.x + p.w;
+          const z1 = p.z, z2 = p.z + p.d;
+          // 尝试将上方箱子放在下方程子的某个角落（这里简化为左下角对齐）
+          const testPos = { x: p.x, y: p.y + p.h, z: p.z };
+          // 检查是否完全在下方程子范围内
+          if (testPos.x + ow > x2 || testPos.z + od > z2) continue;
+          // 检查是否与其他已放置箱子重叠（除了下方这个）
+          let overlap = false;
+          for (let q of updatedPlaced) {
+            if (q === p) continue;
+            if (!(testPos.x + ow <= q.x || testPos.x >= q.x + q.w ||
+                  testPos.z + od <= q.z || testPos.z >= q.z + q.d ||
+                  testPos.y + oh <= q.y || testPos.y >= q.y + q.h)) {
+              overlap = true; break;
+            }
+          }
+          if (!overlap) {
+            bestPlacement = { ow, od, oh, pos: testPos };
+            break;
+          }
+        }
+        if (bestPlacement) break;
+      }
+      if (bestPlacement) {
+        const { ow, od, oh, pos } = bestPlacement;
+        updatedPlaced.push({
+          name: item.name,
+          x: pos.x, y: pos.y, z: pos.z,
+          w: ow, d: od, h: oh
+        });
+        updatedSteps.push(`${item.name} 填充到顶部 (${pos.x},${pos.y},${pos.z}) 尺寸 ${ow}×${od}×${oh} (侧放)`);
+        sortedRemaining.splice(i, 1);
+        changed = true;
+        break; // 重新开始扫描
+      }
+    }
+  }
+  
+  return { placed: updatedPlaced, steps: updatedSteps, remaining: sortedRemaining };
+}
+
+// =============== 多次随机 ===============
 function packMultiple(tw, td, th, baseItems, trials = 5) {
-  let best = { success: false, placed: [], steps: [], remainingCount: baseItems.length };
+  let best = { success: false, placed: [], steps: [], remaining: baseItems };
   for (let t = 0; t < trials; t++) {
     const shuffled = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
-    for (let i = shuffled.length-1; i > 0; i--) {
+    for (let i = shuffled.length-1; i>0; i--) {
       if (Math.random() < 0.5) {
         const j = Math.floor(Math.random() * (i+1));
         [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
       }
     }
     const res = layerPack(tw, td, th, shuffled);
-    if (res.success) return res;
+    if (res.success) return { ...res, remaining: [] };
     if (res.placed.length > best.placed.length) best = res;
   }
   return best;
@@ -313,7 +346,7 @@ function getBoxes() {
   })).filter(b => b.w>0 && b.d>0 && b.h>0 && b.count>0);
 }
 
-// =============== 计算 ===============
+// =============== 计算（异步 + 顶部填充） ===============
 async function calculate() {
   const tw = +document.getElementById('tw').value;
   const td = +document.getElementById('td').value;
@@ -343,19 +376,29 @@ async function calculate() {
       const items = [...baseItems].sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
       result = layerPack(tw, td, th, items);
     }
+
+    // 顶部空隙填充（如果有剩余未放置的箱子）
+    if (!result.success && result.remaining && result.remaining.length > 0) {
+      const fillResult = fillTopGaps(tw, td, th, result.placed, result.remaining);
+      result.placed = fillResult.placed;
+      result.steps.push(...fillResult.steps);
+      result.remaining = fillResult.remaining;
+      result.success = fillResult.remaining.length === 0;
+    }
+
     const elapsed = ((performance.now() - startTime)/1000).toFixed(2);
+    const totalItems = baseItems.length;
+    const placedCount = result.placed.length;
 
     if (!result.success) {
-      resultDiv.textContent = `❌ 未装下全部箱子 (${result.placed.length}/${baseItems.length})，耗时${elapsed}s\n` +
-        (result.remainingCount ? `剩余 ${result.remainingCount} 箱未能放入` : '');
-      if (result.placed.length > 0) {
-        clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
-      }
+      resultDiv.textContent = `❌ 未装下全部箱子 (${placedCount}/${totalItems})，耗时${elapsed}s`;
     } else {
       const fillRate = (result.placed.reduce((s,p)=>s+p.w*p.d*p.h,0) / (tw*td*th) * 100).toFixed(1);
-      resultDiv.textContent = `✅ 全部装入 ${result.placed.length} 箱 耗时${elapsed}s\n填充率: ${fillRate}%\n` + result.steps.join('\n');
-      clearScene(); drawTruck(tw,td,th); drawBoxes(result.placed);
+      resultDiv.textContent = `✅ 全部装入 ${placedCount} 箱 耗时${elapsed}s\n填充率: ${fillRate}%\n` + result.steps.join('\n');
     }
+    clearScene();
+    drawTruck(tw,td,th);
+    drawBoxes(result.placed);
     calcBtn.disabled = false;
     calcBtn.textContent = '🚛 开始计算';
   }, 20);
