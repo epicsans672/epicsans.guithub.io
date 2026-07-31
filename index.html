@@ -3,25 +3,25 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>货车装箱 - 成功版</title>
+  <title>货车装箱 - 最终版</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; }
-    .container { display: flex; height: 100vh; }
-    .panel { width: 380px; background: #16213e; padding: 20px; overflow-y: auto; }
-    h2 { margin-bottom: 15px; color: #e94560; }
-    label { display: block; margin: 10px 0 4px; font-size: 14px; }
-    input, button, select { width: 100%; padding: 8px; border: none; border-radius: 6px; margin-bottom: 8px; }
-    input, select { background: #0f3460; color: #fff; }
-    button { background: #e94560; color: white; font-weight: bold; cursor: pointer; }
-    button:hover { background: #ff6b81; }
-    .box-row { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
-    .box-row input { width: 65px; }
-    .box-row button { width: auto; padding: 6px 10px; font-size: 12px; }
-    #addBoxBtn { margin-top: 10px; }
-    .result { margin-top: 15px; white-space: pre-wrap; font-size: 13px; max-height: 300px; overflow-y: auto; }
-    #viewer { flex: 1; position: relative; }
-    canvas { display: block; }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:system-ui, sans-serif; background:#1a1a2e; color:#eee; }
+    .container { display:flex; height:100vh; }
+    .panel { width:380px; background:#16213e; padding:20px; overflow-y:auto; }
+    h2 { margin-bottom:15px; color:#e94560; }
+    label { display:block; margin:10px 0 4px; font-size:14px; }
+    input, button, select { width:100%; padding:8px; border:none; border-radius:6px; margin-bottom:8px; }
+    input, select { background:#0f3460; color:#fff; }
+    button { background:#e94560; color:white; font-weight:bold; cursor:pointer; }
+    button:hover { background:#ff6b81; }
+    .box-row { display:flex; gap:5px; align-items:center; flex-wrap:wrap; }
+    .box-row input { width:65px; }
+    .box-row button { width:auto; padding:6px 10px; font-size:12px; }
+    #addBoxBtn { margin-top:10px; }
+    .result { margin-top:15px; white-space:pre-wrap; font-size:13px; max-height:300px; overflow-y:auto; }
+    #viewer { flex:1; position:relative; }
+    canvas { display:block; }
   </style>
 </head>
 <body>
@@ -56,67 +56,60 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ---------- 辅助函数 ----------
-function getAllowedOrientations(w, d, h) {
-  // 高度不可侧放，只能水平旋转
-  const orientations = [[w, d, h]];
-  if (w !== d) orientations.push([d, w, h]);
-  return orientations;
+// ==================== 工具函数 ====================
+function getAllowedOrientations(w,d,h, isTopLayer) {
+  // 默认只水平旋转（高不变）
+  const ori = [[w,d,h]];
+  if (w !== d) ori.push([d,w,h]);
+  // 如果是最顶层，允许任意方向（6种）
+  if (isTopLayer) {
+    const all = [
+      [w,d,h],[d,w,h], // 竖立
+      [w,h,d],[h,w,d], // 侧放1
+      [d,h,w],[h,d,w]  // 侧放2
+    ];
+    // 去重
+    const uniq = Array.from(new Set(all.map(a=>a.join(',')))).map(s=>s.split(',').map(Number));
+    return uniq;
+  }
+  return ori;
 }
 
-// ---------- 空间管理器（改进合并） ----------
+// ==================== 空间管理器（带支撑、顶层检测） ====================
 class SpaceManager {
   constructor(tw, td, th) {
-    this.spaces = [{ x: 0, y: 0, z: 0, w: tw, d: td, h: th }];
+    this.spaces = [{ x:0, y:0, z:0, w:tw, d:td, h:th, isFloor:true }]; // isFloor: 底面是车厢地板
+    this.th = th;
   }
 
-  // 强力合并：尝试将任意两个空间融合成一个更大的长方体
   mergeSpaces() {
     let merged = true;
     while (merged) {
       merged = false;
       for (let i = 0; i < this.spaces.length; i++) {
         const a = this.spaces[i];
-        for (let j = i + 1; j < this.spaces.length; j++) {
+        for (let j = i+1; j < this.spaces.length; j++) {
           const b = this.spaces[j];
-          // 上下合并 (y方向)
-          if (a.x === b.x && a.z === b.z && a.w === b.w && a.d === b.d && a.y + a.h === b.y) {
-            a.h += b.h;
-            this.spaces.splice(j, 1);
-            merged = true;
-            break;
+          // 上下合并 (要求同高，且两个空间底面同属性？为简化，只合并同isFloor)
+          if (a.x===b.x && a.z===b.z && a.w===b.w && a.d===b.d && a.y+a.h===b.y && a.isFloor===b.isFloor) {
+            a.h += b.h; this.spaces.splice(j,1); merged=true; break;
           }
-          if (a.x === b.x && a.z === b.z && a.w === b.w && a.d === b.d && b.y + b.h === a.y) {
-            a.y = b.y; a.h += b.h;
-            this.spaces.splice(j, 1);
-            merged = true;
-            break;
+          if (a.x===b.x && a.z===b.z && a.w===b.w && a.d===b.d && b.y+b.h===a.y && a.isFloor===b.isFloor) {
+            a.y = b.y; a.h += b.h; this.spaces.splice(j,1); merged=true; break;
           }
           // 前后合并 (z方向)
-          if (a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h && a.z + a.d === b.z) {
-            a.d += b.d;
-            this.spaces.splice(j, 1);
-            merged = true;
-            break;
+          if (a.x===b.x && a.y===b.y && a.w===b.w && a.h===b.h && a.z+a.d===b.z && a.isFloor===b.isFloor) {
+            a.d += b.d; this.spaces.splice(j,1); merged=true; break;
           }
-          if (a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h && b.z + b.d === a.z) {
-            a.z = b.z; a.d += b.d;
-            this.spaces.splice(j, 1);
-            merged = true;
-            break;
+          if (a.x===b.x && a.y===b.y && a.w===b.w && a.h===b.h && b.z+b.d===a.z && a.isFloor===b.isFloor) {
+            a.z = b.z; a.d += b.d; this.spaces.splice(j,1); merged=true; break;
           }
           // 左右合并 (x方向)
-          if (a.y === b.y && a.z === b.z && a.d === b.d && a.h === b.h && a.x + a.w === b.x) {
-            a.w += b.w;
-            this.spaces.splice(j, 1);
-            merged = true;
-            break;
+          if (a.y===b.y && a.z===b.z && a.d===b.d && a.h===b.h && a.x+a.w===b.x && a.isFloor===b.isFloor) {
+            a.w += b.w; this.spaces.splice(j,1); merged=true; break;
           }
-          if (a.y === b.y && a.z === b.z && a.d === b.d && a.h === b.h && b.x + b.w === a.x) {
-            a.x = b.x; a.w += b.w;
-            this.spaces.splice(j, 1);
-            merged = true;
-            break;
+          if (a.y===b.y && a.z===b.z && a.d===b.d && a.h===b.h && b.x+b.w===a.x && a.isFloor===b.isFloor) {
+            a.x = b.x; a.w += b.w; this.spaces.splice(j,1); merged=true; break;
           }
         }
         if (merged) break;
@@ -124,42 +117,57 @@ class SpaceManager {
     }
   }
 
-  // 尝试放置，返回最佳位置（接触面积优先）
-  queryPlace(bw, bd, bh) {
-    this.mergeSpaces(); // 放置前先合并碎片
+  // 判断空间是否为顶层（顶面接触车厢顶）
+  isTopSpace(space) {
+    return Math.abs(space.y + space.h - this.th) < 0.01;
+  }
+
+  queryPlace(bw, bd, bh, originalW, originalD, originalH) {
+    this.mergeSpaces();
     let best = null;
     for (let i = 0; i < this.spaces.length; i++) {
       const s = this.spaces[i];
-      if (bw <= s.w && bd <= s.d && bh <= s.h) {
-        let contact = 0;
-        if (s.z === 0) contact += bw * bh; // 贴车头
-        if (s.y === 0) contact += bw * bd; // 贴地板
-        if (s.x === 0) contact += bd * bh; // 贴左壁
-        if (!best || contact > best.contact) {
-          best = { idx: i, pos: { x: s.x, y: s.y, z: s.z }, contact };
+      // 支撑检查：底面必须是箱子托举（isFloor=false）或者是地板(y=0)
+      if (s.isFloor && s.y > 0) continue; // 地板且非底层，拒绝
+      
+      // 确定允许的方向
+      const topLayer = this.isTopSpace(s);
+      const orientations = getAllowedOrientations(originalW, originalD, originalH, topLayer);
+      
+      for (let [ow, od, oh] of orientations) {
+        if (ow <= s.w && od <= s.d && oh <= s.h) {
+          // 计算接触得分
+          let contact = 0;
+          if (s.z === 0) contact += ow * oh; // 贴车头
+          if (s.y === 0) contact += ow * od; // 贴地板（此处s.y=0说明是地板，但会被isFloor条件拦住，除非s.y=0允许）
+          if (s.x === 0) contact += od * oh; // 贴左壁
+          // 额外奖励：底面是箱子支撑（已通过isFloor过滤，到这里都是箱子支撑）
+          if (!s.isFloor) contact += ow * od * 0.5; // 箱子支撑奖励
+          
+          const score = contact + (ow*od*oh)*0.001;
+          if (!best || score > best.score) {
+            best = { idx: i, bw:ow, bd:od, bh:oh, score };
+          }
         }
       }
     }
     return best;
   }
 
-  // 执行放置，切割空间并再次合并
-  applyPlace(idx, bw, bd, bh) {
+  applyPlace(idx, bw, bd, bh, isFloorSource) {
     const s = this.spaces[idx];
     const pos = { x: s.x, y: s.y, z: s.z };
     const newSpaces = [];
-    // 右侧空间
-    if (s.w - bw > 0) {
-      newSpaces.push({ x: s.x + bw, y: s.y, z: s.z, w: s.w - bw, d: s.d, h: s.h });
-    }
-    // 上方空间
-    if (s.h - bh > 0) {
-      newSpaces.push({ x: s.x, y: s.y + bh, z: s.z, w: bw, d: s.d, h: s.h - bh });
-    }
-    // 前方空间
-    if (s.d - bd > 0) {
-      newSpaces.push({ x: s.x, y: s.y, z: s.z + bd, w: bw, d: s.d - bd, h: bh });
-    }
+    // 右侧空间 (保持原底面属性)
+    if (s.w - bw > 0)
+      newSpaces.push({ x: s.x+bw, y: s.y, z: s.z, w: s.w-bw, d: s.d, h: s.h, isFloor: s.isFloor });
+    // 上方空间 (底面是刚放的箱子顶面，非地板)
+    if (s.h - bh > 0)
+      newSpaces.push({ x: s.x, y: s.y+bh, z: s.z, w: bw, d: s.d, h: s.h-bh, isFloor: false });
+    // 前方空间 (保持原底面属性)
+    if (s.d - bd > 0)
+      newSpaces.push({ x: s.x, y: s.y, z: s.z+bd, w: bw, d: s.d-bd, h: bh, isFloor: s.isFloor });
+
     this.spaces.splice(idx, 1);
     this.spaces.push(...newSpaces);
     this.mergeSpaces();
@@ -167,15 +175,17 @@ class SpaceManager {
   }
 }
 
-// ---------- 相邻分布（同种箱子聚集成块）----------
+// ==================== 相邻分布（块模式） ====================
 function packAdjacent(tw, td, th, boxes) {
-  const blocks = [];
+  const sm = new SpaceManager(tw, td, th);
+  const placed = [];
   const steps = [];
 
   for (let box of boxes) {
-    let best = null;
-    const orientations = getAllowedOrientations(box.w, box.d, box.h);
-    for (let [bw, bd, bh] of orientations) {
+    // 为当前种类寻找一个紧凑块（只允许水平旋转）
+    let bestBlock = null;
+    const ori = getAllowedOrientations(box.w, box.d, box.h, false); // 块内部不允许倒下
+    for (let [bw, bd, bh] of ori) {
       const maxA = Math.floor(tw / bw);
       const maxB = Math.floor(td / bd);
       const maxC = Math.floor(th / bh);
@@ -184,99 +194,77 @@ function packAdjacent(tw, td, th, boxes) {
         for (let b = 1; b <= maxB; b++) {
           const c = Math.ceil(box.count / (a * b));
           if (c > maxC) continue;
-          const w = a * bw, d = b * bd, h = c * bh;
+          const w = a*bw, d = b*bd, h = c*bh;
           const vol = w * d * h;
-          if (!best || vol < best.vol) {
-            best = { a, b, c, bw, bd, bh, w, d, h, vol, name: box.name, count: box.count };
+          if (!bestBlock || vol < bestBlock.vol) {
+            bestBlock = { a, b, c, bw, bd, bh, w, d, h, vol, name: box.name, count: box.count };
           }
         }
       }
     }
-    if (!best) return { success: false, placed: [], steps: [] };
-    blocks.push(best);
-    steps.push(`将“${box.name}”${box.count}个排列成 ${best.a}×${best.b}×${best.c} 的块（宽${best.w} 深${best.d} 高${best.h}cm）`);
-  }
+    if (!bestBlock) return { success: false, placed: [], steps: [] };
 
-  const sm = new SpaceManager(tw, td, th);
-  const placed = [];
-  const blockSteps = [];
+    // 尝试放置整个块
+    const q = sm.queryPlace(bestBlock.w, bestBlock.d, bestBlock.h, bestBlock.bw, bestBlock.bd, bestBlock.bh);
+    if (!q) return { success: false, placed: [], steps: [] };
 
-  for (let block of blocks) {
-    const q = sm.queryPlace(block.w, block.d, block.h);
-    if (!q) {
-      // 相邻分布失败，尝试将块再拆分成更小的层/堆
-      return { success: false, placed: [], steps: [] };
-    }
-    const pos = sm.applyPlace(q.idx, block.w, block.d, block.h);
-    let remaining = block.count;
-    for (let k = 0; k < block.c && remaining > 0; k++) {
-      for (let j = 0; j < block.b && remaining > 0; j++) {
-        for (let i = 0; i < block.a && remaining > 0; i++) {
+    const pos = sm.applyPlace(q.idx, q.bw, q.bd, q.bh, false); // 上方空间非地板
+    let remaining = bestBlock.count;
+    for (let k = 0; k < bestBlock.c && remaining > 0; k++) {
+      for (let j = 0; j < bestBlock.b && remaining > 0; j++) {
+        for (let i = 0; i < bestBlock.a && remaining > 0; i++) {
           placed.push({
-            name: block.name,
-            x: pos.x + i * block.bw,
-            y: pos.y + k * block.bh,
-            z: pos.z + j * block.bd,
-            w: block.bw, d: block.bd, h: block.bh
+            name: bestBlock.name,
+            x: pos.x + i * bestBlock.bw,
+            y: pos.y + k * bestBlock.bh,
+            z: pos.z + j * bestBlock.bd,
+            w: bestBlock.bw, d: bestBlock.bd, h: bestBlock.bh
           });
           remaining--;
         }
       }
     }
-    blockSteps.push(`整块放置在 (${pos.x},${pos.y},${pos.z})，内部箱子从左到右、从里到外、从下到上排列`);
+    steps.push(`“${bestBlock.name}”${bestBlock.count}个排成 ${bestBlock.a}×${bestBlock.b}×${bestBlock.c} 块，放在(${pos.x},${pos.y},${pos.z})`);
   }
-  return { success: true, placed, steps: [...steps, ...blockSteps] };
+  return { success: true, placed, steps };
 }
 
-// ---------- 占空间最小（混装，确保能装下）----------
+// ==================== 占空间最小（混装） ====================
 function packSpaceMin(tw, td, th, boxes) {
   const sm = new SpaceManager(tw, td, th);
   const placed = [];
   const steps = [];
 
-  // 展开所有箱子为独立项，并按体积降序排列（大箱子优先）
+  // 展开所有箱子项
   const items = [];
   for (let box of boxes) {
     for (let i = 0; i < box.count; i++) {
-      items.push({ name: box.name, orientations: getAllowedOrientations(box.w, box.d, box.h) });
+      items.push({ name: box.name, w: box.w, d: box.d, h: box.h });
     }
   }
-  items.sort((a, b) => {
-    const vol = arr => arr[0] * arr[1] * arr[2];
-    return vol(b.orientations[0]) - vol(a.orientations[0]);
-  });
+  // 按体积降序
+  items.sort((a,b) => (b.w*b.d*b.h) - (a.w*a.d*a.h));
 
-  // 逐个贪心放置，每次选择接触面积最大的方向和位置
+  // 逐个放置
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    let bestRes = null;
-    for (let [bw, bd, bh] of item.orientations) {
-      const q = sm.queryPlace(bw, bd, bh);
-      if (q) {
-        const score = q.contact + (bw * bd * bh) * 0.001; // 稍微偏好大箱子贴边
-        if (!bestRes || score > bestRes.score) {
-          bestRes = { ori: [bw, bd, bh], q, score };
-        }
-      }
-    }
-    if (!bestRes) {
-      return { success: false, placed, steps };
-    }
-    const [bw, bd, bh] = bestRes.ori;
-    const pos = sm.applyPlace(bestRes.q.idx, bw, bd, bh);
-    placed.push({ name: item.name, x: pos.x, y: pos.y, z: pos.z, w: bw, d: bd, h: bh });
-    steps.push(`放置 ${item.name} 于 (${pos.x},${pos.y},${pos.z}) 尺寸 ${bw}×${bd}×${bh}`);
+    const q = sm.queryPlace(item.w, item.d, item.h, item.w, item.d, item.h);
+    if (!q) return { success: false, placed, steps };
+
+    const pos = sm.applyPlace(q.idx, q.bw, q.bd, q.bh, false);
+    placed.push({ name: item.name, x: pos.x, y: pos.y, z: pos.z, w: q.bw, d: q.bd, h: q.bh });
+    steps.push(`放置 ${item.name} 于 (${pos.x},${pos.y},${pos.z}) 尺寸 ${q.bw}×${q.bd}×${q.bh}${q.bh !== item.h ? '(侧放)' : ''}`);
   }
   return { success: true, placed, steps };
 }
 
-// ---------- 3D 渲染 ----------
+// ==================== 3D 渲染 ====================
 let scene, camera, renderer, controls;
 function init3D() {
   const container = document.getElementById('viewer');
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1a1a2e);
-  camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 10, 3000);
+  camera = new THREE.PerspectiveCamera(50, container.clientWidth/container.clientHeight, 10, 3000);
   camera.position.set(600, 500, 800);
   camera.lookAt(100, 100, 200);
   renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -296,44 +284,40 @@ function init3D() {
   });
 }
 
-function drawTruck(w, d, h) {
+function drawTruck(w,d,h) {
   const geo = new THREE.BoxGeometry(w, h, d);
   const mat = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
   const truck = new THREE.Mesh(geo, mat);
-  truck.position.set(w / 2, h / 2, d / 2);
+  truck.position.set(w/2, h/2, d/2);
   scene.add(truck);
 }
 
 function drawBoxes(placed) {
-  const colors = ['#e94560', '#f5a623', '#43d8c9', '#6c5ce7'];
+  const colors = ['#e94560','#f5a623','#43d8c9','#6c5ce7'];
   const colorMap = {};
   let idx = 0;
   for (let item of placed) {
-    if (!colorMap[item.name]) {
-      colorMap[item.name] = colors[idx++ % colors.length];
-    }
+    if (!colorMap[item.name]) colorMap[item.name] = colors[idx++ % colors.length];
     const color = colorMap[item.name];
     const geo = new THREE.BoxGeometry(item.w, item.h, item.d);
-    const mat = new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.75 });
+    const mat = new THREE.MeshPhongMaterial({ color, transparent:true, opacity:0.75 });
     const cube = new THREE.Mesh(geo, mat);
-    cube.position.set(item.x + item.w / 2, item.y + item.h / 2, item.z + item.d / 2);
+    cube.position.set(item.x + item.w/2, item.y + item.h/2, item.z + item.d/2);
     scene.add(cube);
-    const edge = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0xffffff }));
-    cube.add(edge);
+    cube.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({color:0xffffff})));
   }
 }
 
 function clearScene() {
-  if (!scene) return;
-  while (scene.children.length > 0) scene.remove(scene.children[0]);
-  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-  const light = new THREE.DirectionalLight(0xffffff, 0.8);
-  light.position.set(300, 500, 400);
-  scene.add(light);
+  while(scene.children.length) scene.remove(scene.children[0]);
+  scene.add(new THREE.AmbientLight(0xffffff,0.6));
+  const l = new THREE.DirectionalLight(0xffffff,0.8);
+  l.position.set(300,500,400);
+  scene.add(l);
 }
 
-// ---------- UI 逻辑 ----------
-function addBoxRow(name = '', w = '', d = '', h = '', count = '') {
+// ==================== UI ====================
+function addBoxRow(name='',w='',d='',h='',cnt='') {
   const div = document.createElement('div');
   div.className = 'box-row';
   div.innerHTML = `
@@ -341,21 +325,20 @@ function addBoxRow(name = '', w = '', d = '', h = '', count = '') {
     <input class="boxW" type="number" placeholder="宽" value="${w}">
     <input class="boxD" type="number" placeholder="深" value="${d}">
     <input class="boxH" type="number" placeholder="高" value="${h}">
-    <input class="boxCount" type="number" placeholder="数量" value="${count}">
-    <button class="delBox">✕</button>
-  `;
+    <input class="boxCount" type="number" placeholder="数量" value="${cnt}">
+    <button class="delBox">✕</button>`;
   div.querySelector('.delBox').onclick = () => div.remove();
   document.getElementById('boxList').appendChild(div);
 }
 
 function getBoxes() {
-  return Array.from(document.querySelectorAll('#boxList .box-row')).map(row => ({
-    name: row.querySelector('.boxName').value,
-    w: +row.querySelector('.boxW').value,
-    d: +row.querySelector('.boxD').value,
-    h: +row.querySelector('.boxH').value,
-    count: +row.querySelector('.boxCount').value
-  })).filter(b => b.w > 0 && b.d > 0 && b.h > 0 && b.count > 0);
+  return Array.from(document.querySelectorAll('#boxList .box-row')).map(r => ({
+    name: r.querySelector('.boxName').value,
+    w: +r.querySelector('.boxW').value,
+    d: +r.querySelector('.boxD').value,
+    h: +r.querySelector('.boxH').value,
+    count: +r.querySelector('.boxCount').value
+  })).filter(b => b.w>0 && b.d>0 && b.h>0 && b.count>0);
 }
 
 async function calculate() {
@@ -363,24 +346,23 @@ async function calculate() {
   const td = +document.getElementById('td').value;
   const th = +document.getElementById('th').value;
   const boxes = getBoxes();
-  if (!tw || !td || !th || !boxes.length) return alert('请完整填写尺寸和至少一个纸箱');
+  if (!tw||!td||!th||!boxes.length) return alert('请完整填写尺寸和至少一个纸箱');
 
   const mode = document.getElementById('mode').value;
   let result;
   const adjRes = packAdjacent(tw, td, th, boxes);
-  
   if (mode === 'adjacent') {
     result = adjRes;
   } else if (mode === 'space') {
     result = packSpaceMin(tw, td, th, boxes);
-  } else { // auto
+  } else {
     if (adjRes.success) {
       result = adjRes;
-      document.getElementById('resultText').textContent = '✅ 已采用“相邻分布”方案：\n' + adjRes.steps.join('\n');
+      document.getElementById('resultText').textContent = '✅ 采用“相邻分布”方案：\n' + adjRes.steps.join('\n');
     } else {
       result = packSpaceMin(tw, td, th, boxes);
       if (result.success) {
-        document.getElementById('resultText').textContent = '⚠️ 相邻分布失败，已切换为“占空间最小”方案：\n' + result.steps.join('\n');
+        document.getElementById('resultText').textContent = '⚠️ 相邻分布失败，切换为“占空间最小”方案：\n' + result.steps.join('\n');
       } else {
         document.getElementById('resultText').textContent = '❌ 无法装入所有箱子，请检查尺寸。';
         return;
@@ -392,23 +374,22 @@ async function calculate() {
     document.getElementById('resultText').textContent = '❌ 装不下所有箱子。';
     return;
   }
-
-  document.getElementById('resultText').textContent = '✅ 成功装入全部 ' + result.placed.length + ' 个箱子\n' + result.steps.join('\n');
+  document.getElementById('resultText').textContent = `✅ 成功装入 ${result.placed.length} 个箱子\n` + result.steps.join('\n');
   clearScene();
   drawTruck(tw, td, th);
   drawBoxes(result.placed);
 }
 
 // 默认数据
-addBoxRow('纸箱A', '40', '40', '64', '50');
-addBoxRow('纸箱B', '43', '43', '72', '50');
-addBoxRow('纸箱C', '40', '40', '52', '100');
-addBoxRow('纸箱D', '32', '32', '51', '100');
+addBoxRow('纸箱A','40','40','64','50');
+addBoxRow('纸箱B','43','43','72','50');
+addBoxRow('纸箱C','40','40','52','100');
+addBoxRow('纸箱D','32','32','51','100');
 
 document.getElementById('addBoxBtn').onclick = () => addBoxRow();
 document.getElementById('calcBtn').onclick = calculate;
 init3D();
-drawTruck(235, 589, 239);
+drawTruck(235,589,239);
 
 function animate() {
   requestAnimationFrame(animate);
